@@ -943,79 +943,83 @@ app.post(
 					const injectToken = (varName, sourceText) => {
 						if (!varName || !sourceText) return false;
 						const token = `{{${varName}}}`;
-						if (xml.includes(token)) return true;
+						let replacedAny = false;
+						while (true) {
+							const { joined, map } = buildJoined();
+							const hay = joined;
+							const needle = nbspToSpace(sourceText);
+							const startIdx = hay.indexOf(needle);
+							if (startIdx === -1) break;
+							const endIdx = startIdx + needle.length - 1;
+							const startMap = map[startIdx];
+							const endMap = map[endIdx];
+							if (!startMap || !endMap) break;
 
-						const { joined, map } = buildJoined();
-						const hay = joined;
-						const needle = nbspToSpace(sourceText);
-						const startIdx = hay.indexOf(needle);
-						if (startIdx === -1) return false;
-						const endIdx = startIdx + needle.length - 1;
-						const startMap = map[startIdx];
-						const endMap = map[endIdx];
-						if (!startMap || !endMap) return false;
-
-						const patches = [];
-						const startSeg = segments[startMap.segIdx];
-						const endSeg = segments[endMap.segIdx];
-						// Patch end segment first if different: remove leading covered part
-						if (startMap.segIdx !== endMap.segIdx) {
-							patches.push({
-								start: endSeg.contentStart,
-								end: endSeg.contentStart + endMap.offset + 1,
-								replacement: "",
-							});
-							// Remove full content of intermediate segments
-							for (
-								let i = startMap.segIdx + 1;
-								i <= endMap.segIdx - 1;
-								i++
-							) {
-								const seg = segments[i];
+							const patches = [];
+							const startSeg = segments[startMap.segIdx];
+							const endSeg = segments[endMap.segIdx];
+							// Patch end segment first if different: remove leading covered part
+							if (startMap.segIdx !== endMap.segIdx) {
 								patches.push({
-									start: seg.contentStart,
-									end: seg.contentEnd,
+									start: endSeg.contentStart,
+									end:
+										endSeg.contentStart + endMap.offset + 1,
 									replacement: "",
 								});
+								// Remove full content of intermediate segments
+								for (
+									let i = startMap.segIdx + 1;
+									i <= endMap.segIdx - 1;
+									i++
+								) {
+									const seg = segments[i];
+									patches.push({
+										start: seg.contentStart,
+										end: seg.contentEnd,
+										replacement: "",
+									});
+								}
+								// Replace tail of start segment with token
+								patches.push({
+									start:
+										startSeg.contentStart + startMap.offset,
+									end: startSeg.contentEnd,
+									replacement: token,
+								});
+							} else {
+								// Single segment replacement
+								patches.push({
+									start:
+										startSeg.contentStart + startMap.offset,
+									end:
+										startSeg.contentStart +
+										endMap.offset +
+										1,
+									replacement: token,
+								});
 							}
-							// Replace tail of start segment with token
-							const startText = xml.slice(
-								startSeg.contentStart,
-								startSeg.contentEnd
-							);
-							const before = startText.slice(0, startMap.offset);
-							patches.push({
-								start: startSeg.contentStart + startMap.offset,
-								end: startSeg.contentEnd,
-								replacement: token,
-							});
-						} else {
-							// Single segment replacement
-							patches.push({
-								start: startSeg.contentStart + startMap.offset,
-								end: startSeg.contentStart + endMap.offset + 1,
-								replacement: token,
-							});
-						}
 
-						xml = applyPatches(xml, patches);
-						// Update segments positions after patches: re-parse
-						segments.length = 0;
-						reNode.lastIndex = 0;
-						while ((m = reNode.exec(xml))) {
-							const full = m[0];
-							const content = m[1];
-							const fullStart = m.index;
-							const openIdx = full.indexOf(">");
-							const contentStart = fullStart + openIdx + 1;
-							const contentEnd = contentStart + content.length;
-							segments.push({
-								contentStart,
-								contentEnd,
-								text: content,
-							});
+							xml = applyPatches(xml, patches);
+							// Update segments positions after patches: re-parse for next iteration
+							segments.length = 0;
+							reNode.lastIndex = 0;
+							while ((m = reNode.exec(xml))) {
+								const full = m[0];
+								const content = m[1];
+								const fullStart = m.index;
+								const openIdx = full.indexOf(">");
+								const contentStart = fullStart + openIdx + 1;
+								const contentEnd =
+									contentStart + content.length;
+								segments.push({
+									contentStart,
+									contentEnd,
+									text: content,
+								});
+							}
+							replacedAny = true;
 						}
-						return true;
+						return replacedAny;
 					};
 
 					for (const v of parsedVariables) {
