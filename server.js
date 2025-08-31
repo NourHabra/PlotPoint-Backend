@@ -1580,6 +1580,29 @@ app.post("/api/reports/:id/generate", async (req, res) => {
 	}
 });
 
+// Delete report (owner only) if not Submitted
+app.delete("/api/reports/:id", async (req, res) => {
+	try {
+		const payload = getAuthPayload(req);
+		if (!payload) return res.status(401).json({ message: "Unauthorized" });
+		const report = await Report.findById(req.params.id);
+		if (!report)
+			return res.status(404).json({ message: "Report not found" });
+		if (String(report.createdBy) !== String(payload.sub || payload.email)) {
+			return res.status(403).json({ message: "Forbidden" });
+		}
+		if ((report.status || "Draft") === "Submitted") {
+			return res
+				.status(400)
+				.json({ message: "Submitted reports cannot be deleted" });
+		}
+		await Report.findByIdAndDelete(req.params.id);
+		return res.json({ message: "Report deleted" });
+	} catch (error) {
+		return res.status(500).json({ message: error.message });
+	}
+});
+
 // Generate WYSIWYG HTML preview from filled DOCX
 app.post("/api/templates/:id/preview-html", async (req, res) => {
 	try {
