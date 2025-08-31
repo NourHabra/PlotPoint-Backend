@@ -312,6 +312,37 @@ function computeSrcRectCover(pxW, pxH, imgW, imgH) {
 	return { l: toPct(l), r: toPct(r), t: toPct(t), b: toPct(b) };
 }
 
+// Ensure Word updates fields (like Table of Contents) on document open
+function enableUpdateFieldsOnOpen(zip) {
+	try {
+		const settingsPath = "word/settings.xml";
+		let xml = null;
+		try {
+			const f = zip.file(settingsPath);
+			if (f) xml = f.asText();
+		} catch (_) {}
+		if (!xml || typeof xml !== "string" || !xml.trim()) {
+			xml =
+				'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+				'<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"></w:settings>';
+		}
+		if (/<w:updateFields\b/i.test(xml)) {
+			// Force true if tag exists
+			xml = xml.replace(
+				/<w:updateFields[^>]*\/>/i,
+				'<w:updateFields w:val="true"/>'
+			);
+		} else {
+			// Insert before closing settings
+			xml = xml.replace(
+				/<\/w:settings>/i,
+				'<w:updateFields w:val="true"/></w:settings>'
+			);
+		}
+		zip.file(settingsPath, xml);
+	} catch (_) {}
+}
+
 function applySrcRectForRid(xml, rid, srcRect) {
 	try {
 		if (!srcRect) return xml;
@@ -720,6 +751,11 @@ async function generateFromTemplate(template, inputValues, output, res) {
 			detail: error.message,
 		});
 	}
+
+	// Ensure TOC and other fields refresh on open
+	try {
+		enableUpdateFieldsOnOpen(zip);
+	} catch (_) {}
 
 	const buf = doc.getZip().generate({ type: "nodebuffer" });
 	const outDocx = path.join(uploadsDir, `out-${Date.now()}.docx`);
@@ -1727,6 +1763,11 @@ app.post("/api/templates/:id/preview-html", async (req, res) => {
 				detail: error.message,
 			});
 		}
+
+		// Ensure TOC and other fields refresh on open for the filled DOCX
+		try {
+			enableUpdateFieldsOnOpen(zip);
+		} catch (_) {}
 
 		const filledBuf = doc.getZip().generate({ type: "nodebuffer" });
 		// Convert to HTML for WYSIWYG-ish preview in-memory without writing files
