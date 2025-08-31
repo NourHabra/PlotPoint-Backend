@@ -443,6 +443,75 @@ function applyCoverCroppingForTarget(
 	} catch (_) {}
 }
 
+// ----- Image cleanup utilities -----
+function normalizeLocalImageUrl(input) {
+	try {
+		const s = String(input || "").trim();
+		if (!s) return "";
+		// Extract /uploads/images/<file> from absolute URLs as well
+		const m = s.match(/\/uploads\/images\/[A-Za-z0-9._%-]+/);
+		if (m && m[0]) return m[0];
+		if (s.startsWith("/uploads/images/")) return s;
+		if (s.startsWith("uploads/images/")) return "/" + s;
+		return "";
+	} catch (_) {
+		return "";
+	}
+}
+
+function collectLocalImageUrls(value) {
+	const out = new Set();
+	const visit = (v) => {
+		if (v === null || v === undefined) return;
+		const t = typeof v;
+		if (t === "string") {
+			const u = normalizeLocalImageUrl(v);
+			if (u) out.add(u);
+			return;
+		}
+		if (Array.isArray(v)) {
+			for (const it of v) visit(it);
+			return;
+		}
+		if (t === "object") {
+			for (const k of Object.keys(v)) visit(v[k]);
+		}
+	};
+	visit(value);
+	return Array.from(out);
+}
+
+async function isImageUrlUsedByAnyOtherReport(url, excludeId) {
+	try {
+		const all = await Report.find(
+			excludeId ? { _id: { $ne: excludeId } } : {},
+			{ values: 1 }
+		).lean();
+		const target = String(url || "");
+		const alt = target.replace(/^\//, "");
+		for (const r of all) {
+			const s = JSON.stringify(r && r.values ? r.values : {});
+			if (s.includes(target) || s.includes(alt)) return true;
+		}
+		return false;
+	} catch (_) {
+		return true; // be safe (assume used) on errors
+	}
+}
+
+function deleteLocalImageByUrl(url) {
+	try {
+		const norm = normalizeLocalImageUrl(url);
+		if (!norm) return;
+		const fname = norm.replace(/^\/uploads\/images\//, "");
+		if (!fname) return;
+		const full = path.join(imagesDir, fname);
+		try {
+			fs.rmSync(full, { force: true });
+		} catch (_) {}
+	} catch (_) {}
+}
+
 // Routes
 app.get("/", (req, res) => {
 	res.json({ message: "Template API is running" });
@@ -1519,6 +1588,7 @@ app.put("/api/reports/:id", async (req, res) => {
 		if (String(existing.createdBy) !== String(payload.sub || payload.email))
 			return res.status(403).json({ message: "Forbidden" });
 		const { name, title, values, status, kmlData } = req.body || {};
+		const prevImageUrls = collectLocalImageUrls(existing.values || {});
 		if (
 			status !== undefined &&
 			!isValidNextStatus(existing.status || "Draft", status)
@@ -1566,6 +1636,22 @@ app.put("/api/reports/:id", async (req, res) => {
 		);
 		if (!updated)
 			return res.status(404).json({ message: "Report not found" });
+		// Cleanup images no longer referenced in this report and not used elsewhere
+		if (finalValues !== undefined) {
+			try {
+				const nextImageUrls = collectLocalImageUrls(finalValues || {});
+				const removed = prevImageUrls.filter(
+					(u) => !nextImageUrls.includes(u)
+				);
+				for (const url of removed) {
+					const used = await isImageUrlUsedByAnyOtherReport(
+						url,
+						updated._id
+					);
+					if (!used) deleteLocalImageByUrl(url);
+				}
+			} catch (_) {}
+		}
 		res.json(updated);
 	} catch (error) {
 		res.status(400).json({ message: error.message });
@@ -1632,7 +1718,18 @@ app.delete("/api/reports/:id", async (req, res) => {
 				.status(400)
 				.json({ message: "Submitted reports cannot be deleted" });
 		}
+		const imageUrls = collectLocalImageUrls(report.values || {});
 		await Report.findByIdAndDelete(req.params.id);
+		// Attempt to delete any images no longer referenced by any report
+		try {
+			for (const url of imageUrls) {
+				const used = await isImageUrlUsedByAnyOtherReport(
+					url,
+					report._id
+				);
+				if (!used) deleteLocalImageByUrl(url);
+			}
+		} catch (_) {}
 		return res.json({ message: "Report deleted" });
 	} catch (error) {
 		return res.status(500).json({ message: error.message });
