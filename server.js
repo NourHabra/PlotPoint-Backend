@@ -1692,7 +1692,15 @@ app.put("/api/reports/:id", async (req, res) => {
 			return res.status(404).json({ message: "Report not found" });
 		if (String(existing.createdBy) !== String(payload.sub || payload.email))
 			return res.status(403).json({ message: "Forbidden" });
-		const { name, title, values, status, kmlData } = req.body || {};
+		const {
+			name,
+			title,
+			values,
+			status,
+			kmlData,
+			checklistProgress,
+			checklistStatus,
+		} = req.body || {};
 		const prevImageUrls = collectLocalImageUrls(existing.values || {});
 		if (
 			status !== undefined &&
@@ -1728,16 +1736,46 @@ app.put("/api/reports/:id", async (req, res) => {
 				}
 			} catch (_) {}
 		}
+		// Build update payload
+		const updatePayload = {
+			...(name !== undefined && { name }),
+			...(title !== undefined && { title }),
+			...(finalValues !== undefined && { values: finalValues }),
+			...(status !== undefined && { status }),
+			...(kmlData !== undefined && { kmlData }),
+		};
+		if (Array.isArray(checklistProgress)) {
+			updatePayload.checklistProgress = checklistProgress.map((it) => ({
+				id: String(it && it.id),
+				checked: !!(it && it.checked),
+			}));
+			// Compute status if not explicitly provided
+			try {
+				const arr = updatePayload.checklistProgress || [];
+				const total = arr.length;
+				const checkedCount = arr.filter((x) => x && x.checked).length;
+				let stat = "empty";
+				if (total > 0) {
+					stat =
+						checkedCount === 0
+							? "empty"
+							: checkedCount === total
+							? "complete"
+							: "partial";
+				}
+				updatePayload.checklistStatus = stat;
+			} catch (_) {}
+		}
+		if (typeof checklistStatus === "string") {
+			updatePayload.checklistStatus = checklistStatus;
+		}
 		const updated = await Report.findByIdAndUpdate(
 			req.params.id,
+			updatePayload,
 			{
-				...(name !== undefined && { name }),
-				...(title !== undefined && { title }),
-				...(finalValues !== undefined && { values: finalValues }),
-				...(status !== undefined && { status }),
-				...(kmlData !== undefined && { kmlData }),
-			},
-			{ new: true, runValidators: true }
+				new: true,
+				runValidators: true,
+			}
 		);
 		if (!updated)
 			return res.status(404).json({ message: "Report not found" });
