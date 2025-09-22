@@ -37,6 +37,7 @@ const Template = require("./models/Template");
 const Report = require("./models/Report");
 const Ticket = require("./models/Ticket");
 const User = require("./models/User");
+const UserTemplate = require("./models/UserTemplate");
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
 
@@ -699,6 +700,110 @@ app.get("/api/users/me", async (req, res) => {
 		});
 	} catch (error) {
 		res.status(500).json({ message: error.message });
+	}
+});
+
+// ----- User Templates (per-user customizations: variable snippets and checklist) -----
+// Get current user's customization for a template
+app.get("/api/user-templates", async (req, res) => {
+	try {
+		const payload = getAuthPayload(req);
+		if (!payload) return res.status(401).json({ message: "Unauthorized" });
+		const isAdmin = payload.role === "Admin";
+		const { templateId, userId: qUserId } = req.query || {};
+		if (!templateId)
+			return res.status(400).json({ message: "templateId is required" });
+		const userId =
+			isAdmin && qUserId
+				? String(qUserId)
+				: String(payload.sub || payload.email);
+		const doc = await UserTemplate.findOne({ userId, templateId }).lean();
+		if (!doc) return res.status(404).json({ message: "Not found" });
+		return res.json(doc);
+	} catch (error) {
+		return res.status(500).json({ message: error.message });
+	}
+});
+
+// Create current user's customization for a template (idempotent by unique index)
+app.post("/api/user-templates", async (req, res) => {
+	try {
+		const payload = getAuthPayload(req);
+		if (!payload) return res.status(401).json({ message: "Unauthorized" });
+		const { templateId, variableTextTemplates, checklist } = req.body || {};
+		if (!templateId)
+			return res.status(400).json({ message: "templateId is required" });
+		const tpl = await Template.findById(templateId);
+		if (!tpl)
+			return res.status(404).json({ message: "Template not found" });
+		const userId = String(payload.sub || payload.email);
+		try {
+			const created = await UserTemplate.create({
+				userId,
+				templateId,
+				...(Array.isArray(variableTextTemplates) && {
+					variableTextTemplates,
+				}),
+				...(Array.isArray(checklist) && { checklist }),
+			});
+			return res.status(201).json(created);
+		} catch (e) {
+			// Handle duplicate (already exists)
+			if (e && e.code === 11000) {
+				const existing = await UserTemplate.findOne({
+					userId,
+					templateId,
+				});
+				return res.status(200).json(existing);
+			}
+			throw e;
+		}
+	} catch (error) {
+		return res.status(400).json({ message: error.message });
+	}
+});
+
+// Get a user-template by id (owner or admin)
+app.get("/api/user-templates/:id", async (req, res) => {
+	try {
+		const payload = getAuthPayload(req);
+		if (!payload) return res.status(401).json({ message: "Unauthorized" });
+		const doc = await UserTemplate.findById(req.params.id);
+		if (!doc) return res.status(404).json({ message: "Not found" });
+		const isOwner =
+			String(doc.userId) === String(payload.sub || payload.email);
+		if (!isOwner && payload.role !== "Admin")
+			return res.status(403).json({ message: "Forbidden" });
+		return res.json(doc);
+	} catch (error) {
+		return res.status(500).json({ message: error.message });
+	}
+});
+
+// Update parts of a user-template (owner or admin)
+app.patch("/api/user-templates/:id", async (req, res) => {
+	try {
+		const payload = getAuthPayload(req);
+		if (!payload) return res.status(401).json({ message: "Unauthorized" });
+		const doc = await UserTemplate.findById(req.params.id);
+		if (!doc) return res.status(404).json({ message: "Not found" });
+		const isOwner =
+			String(doc.userId) === String(payload.sub || payload.email);
+		if (!isOwner && payload.role !== "Admin")
+			return res.status(403).json({ message: "Forbidden" });
+		const { variableTextTemplates, checklist } = req.body || {};
+		const updates = {};
+		if (Array.isArray(variableTextTemplates))
+			updates.variableTextTemplates = variableTextTemplates;
+		if (Array.isArray(checklist)) updates.checklist = checklist;
+		const updated = await UserTemplate.findByIdAndUpdate(
+			req.params.id,
+			updates,
+			{ new: true, runValidators: true }
+		);
+		return res.json(updated);
+	} catch (error) {
+		return res.status(400).json({ message: error.message });
 	}
 });
 
@@ -1587,7 +1692,15 @@ app.put("/api/reports/:id", async (req, res) => {
 			return res.status(404).json({ message: "Report not found" });
 		if (String(existing.createdBy) !== String(payload.sub || payload.email))
 			return res.status(403).json({ message: "Forbidden" });
-		const { name, title, values, status, kmlData } = req.body || {};
+		const {
+			name,
+			title,
+			values,
+			status,
+			kmlData,
+			checklistProgress,
+			checklistStatus,
+		} = req.body || {};
 		const prevImageUrls = collectLocalImageUrls(existing.values || {});
 		if (
 			status !== undefined &&
@@ -1623,16 +1736,46 @@ app.put("/api/reports/:id", async (req, res) => {
 				}
 			} catch (_) {}
 		}
+		// Build update payload
+		const updatePayload = {
+			...(name !== undefined && { name }),
+			...(title !== undefined && { title }),
+			...(finalValues !== undefined && { values: finalValues }),
+			...(status !== undefined && { status }),
+			...(kmlData !== undefined && { kmlData }),
+		};
+		if (Array.isArray(checklistProgress)) {
+			updatePayload.checklistProgress = checklistProgress.map((it) => ({
+				id: String(it && it.id),
+				checked: !!(it && it.checked),
+			}));
+			// Compute status if not explicitly provided
+			try {
+				const arr = updatePayload.checklistProgress || [];
+				const total = arr.length;
+				const checkedCount = arr.filter((x) => x && x.checked).length;
+				let stat = "empty";
+				if (total > 0) {
+					stat =
+						checkedCount === 0
+							? "empty"
+							: checkedCount === total
+							? "complete"
+							: "partial";
+				}
+				updatePayload.checklistStatus = stat;
+			} catch (_) {}
+		}
+		if (typeof checklistStatus === "string") {
+			updatePayload.checklistStatus = checklistStatus;
+		}
 		const updated = await Report.findByIdAndUpdate(
 			req.params.id,
+			updatePayload,
 			{
-				...(name !== undefined && { name }),
-				...(title !== undefined && { title }),
-				...(finalValues !== undefined && { values: finalValues }),
-				...(status !== undefined && { status }),
-				...(kmlData !== undefined && { kmlData }),
-			},
-			{ new: true, runValidators: true }
+				new: true,
+				runValidators: true,
+			}
 		);
 		if (!updated)
 			return res.status(404).json({ message: "Report not found" });

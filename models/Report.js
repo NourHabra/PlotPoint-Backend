@@ -40,6 +40,24 @@ const reportSchema = new mongoose.Schema(
 			type: Boolean,
 			default: false,
 		},
+		// Per-report checklist progress (user-defined per template)
+		checklistProgress: {
+			type: [
+				new mongoose.Schema(
+					{
+						id: { type: String, required: true },
+						checked: { type: Boolean, default: false },
+					},
+					{ _id: false }
+				),
+			],
+			default: [],
+		},
+		checklistStatus: {
+			type: String,
+			enum: ["empty", "partial", "complete"],
+			default: "empty",
+		},
 	},
 	{ timestamps: true }
 );
