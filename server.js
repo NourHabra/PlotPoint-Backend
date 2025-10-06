@@ -791,10 +791,13 @@ app.patch("/api/user-templates/:id", async (req, res) => {
 			String(doc.userId) === String(payload.sub || payload.email);
 		if (!isOwner && payload.role !== "Admin")
 			return res.status(403).json({ message: "Forbidden" });
-		const { variableTextTemplates, checklist } = req.body || {};
+		const { variableTextTemplates, variableSelectOptions, checklist } =
+			req.body || {};
 		const updates = {};
 		if (Array.isArray(variableTextTemplates))
 			updates.variableTextTemplates = variableTextTemplates;
+		if (Array.isArray(variableSelectOptions))
+			updates.variableSelectOptions = variableSelectOptions;
 		if (Array.isArray(checklist)) updates.checklist = checklist;
 		const updated = await UserTemplate.findByIdAndUpdate(
 			req.params.id,

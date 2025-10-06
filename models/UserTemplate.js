@@ -16,6 +16,22 @@ const variableSnippetsSchema = new mongoose.Schema(
 	{ _id: false }
 );
 
+const selectOptionSchema = new mongoose.Schema(
+	{
+		id: { type: String, required: true },
+		value: { type: String, required: true },
+	},
+	{ _id: false }
+);
+
+const variableSelectOptionsSchema = new mongoose.Schema(
+	{
+		variableId: { type: String, required: true },
+		options: { type: [selectOptionSchema], default: [] },
+	},
+	{ _id: false }
+);
+
 const checklistItemSchema = new mongoose.Schema(
 	{
 		id: { type: String, required: true },
@@ -36,6 +52,10 @@ const userTemplateSchema = new mongoose.Schema(
 			index: true,
 		},
 		variableTextTemplates: { type: [variableSnippetsSchema], default: [] },
+		variableSelectOptions: {
+			type: [variableSelectOptionsSchema],
+			default: [],
+		},
 		checklist: { type: [checklistItemSchema], default: [] },
 	},
 	{ timestamps: true }
