@@ -518,6 +518,97 @@ app.get("/", (req, res) => {
 	res.json({ message: "Template API is running" });
 });
 
+// Analyze an already tokenized DOCX: extract variable tokens and media placeholders
+app.post(
+	"/api/templates/analyze-docx",
+	upload.single("file"),
+	async (req, res) => {
+		try {
+			if (!req.file)
+				return res.status(400).json({ message: "file is required" });
+			const bin = fs.readFileSync(req.file.path, "binary");
+			const zip = new PizZip(bin);
+			// Collect tokens across all word parts
+			const xmlPaths = Object.keys(zip.files || {}).filter(
+				(k) =>
+					k.startsWith("word/") &&
+					k.endsWith(".xml") &&
+					!k.includes("/_rels/")
+			);
+			const tokenSet = new Set();
+			const canonicalSet = new Set();
+			for (const p of xmlPaths) {
+				const f = zip.file(p);
+				if (!f) continue;
+				const xml = f.asText();
+				// Match tokens even if split by XML tags within the braces
+				const re = /\{\{\s*([\s\S]*?)\s*\}\}/g;
+				const decodeXmlEntities = (s) =>
+					String(s || "")
+						.replace(/&amp;/g, "&")
+						.replace(/&lt;/g, "<")
+						.replace(/&gt;/g, ">")
+						.replace(/&quot;/g, '"')
+						.replace(/&apos;/g, "'")
+						.replace(/&#([0-9]+);/g, (_, n) =>
+							String.fromCharCode(parseInt(n, 10))
+						)
+						.replace(/&#x([0-9a-fA-F]+);/g, (_, n) =>
+							String.fromCharCode(parseInt(n, 16))
+						);
+				let m;
+				while ((m = re.exec(xml))) {
+					const inner = String(m[1] || "");
+					// Decode entities first, then remove XML tags that may be interleaved
+					const decodedFirst = decodeXmlEntities(inner);
+					const withoutTags = decodedFirst.replace(/<[^>]*>/g, "");
+					// Normalize whitespace and remove NBSP
+					const cleaned = withoutTags.replace(/\u00A0/g, " ");
+					const name = cleaned.replace(/\s+/g, " ").trim();
+					if (!name) continue;
+					// Guard against any residual markup sneaking through
+					if (/[<>]/.test(name)) continue;
+					const canonical = name.toLowerCase();
+					if (canonicalSet.has(canonical)) continue;
+					canonicalSet.add(canonical);
+					tokenSet.add(name);
+				}
+			}
+			// Enumerate media placeholders
+			const media = Object.keys(zip.files || {})
+				.filter((k) => k.startsWith("word/media/") && !zip.files[k].dir)
+				.map((target) => {
+					const extent =
+						findExtentForTargetInZip(zip, target) || null;
+					return {
+						target,
+						extent,
+						fileName: path.basename(target),
+					};
+				});
+			const variables = Array.from(tokenSet).map((name) => ({
+				id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+				name,
+			}));
+			return res.status(200).json({
+				uploadedPath: req.file.path,
+				variables,
+				media,
+			});
+		} catch (error) {
+			// On parse errors, still succeed with uploadedPath so the flow can continue
+			return res.status(200).json({
+				uploadedPath:
+					req && req.file && req.file.path ? req.file.path : "",
+				variables: [],
+				media: [],
+				message:
+					"Analyze failed; proceeding with empty variables and media",
+			});
+		}
+	}
+);
+
 function getAuthPayload(req) {
 	const auth = req.headers.authorization || "";
 	const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
@@ -894,13 +985,33 @@ async function generateFromTemplate(template, inputValues, output, res) {
 	// Build final values map and evaluate calculateds; map KML aliases
 	const finalValues = { ...(inputValues || {}) };
 	for (const v of template.variables || []) {
-		if (
-			v.type === "kml" &&
-			v.kmlField &&
-			finalValues[v.kmlField] &&
-			!finalValues[v.name]
-		) {
-			finalValues[v.name] = finalValues[v.kmlField];
+		if (v.type === "kml" && v.kmlField) {
+			let srcVal = undefined;
+			try {
+				if (
+					inputValues &&
+					typeof inputValues === "object" &&
+					inputValues.kmlData &&
+					Object.prototype.hasOwnProperty.call(
+						inputValues.kmlData,
+						v.kmlField
+					)
+				) {
+					srcVal = inputValues.kmlData[v.kmlField];
+				}
+			} catch (_) {}
+			if (srcVal === undefined || srcVal === null) {
+				srcVal =
+					finalValues[v.kmlField] !== undefined &&
+					finalValues[v.kmlField] !== null
+						? finalValues[v.kmlField]
+						: finalValues[v.name];
+			}
+			if (srcVal !== undefined && srcVal !== null) {
+				const str = String(srcVal);
+				finalValues[v.kmlField] = str;
+				finalValues[v.name] = str;
+			}
 		}
 		if (v.type === "calculated" && v.expression) {
 			try {
@@ -1329,6 +1440,109 @@ app.post(
 		}
 	}
 );
+
+// Finalize import of an already tokenized DOCX using provided variables metadata
+app.post("/api/templates/finalize-import", async (req, res) => {
+	try {
+		const {
+			name,
+			description = "",
+			requiresKml = false,
+			variableGroups,
+			variables,
+			sourceDocxPath,
+		} = req.body || {};
+		if (!name) return res.status(400).json({ message: "name is required" });
+		if (!sourceDocxPath)
+			return res
+				.status(400)
+				.json({ message: "sourceDocxPath is required" });
+		if (!fs.existsSync(sourceDocxPath))
+			return res
+				.status(400)
+				.json({ message: "sourceDocxPath does not exist" });
+
+		let parsedVariables = Array.isArray(variables) ? variables : [];
+		let parsedGroups = Array.isArray(variableGroups) ? variableGroups : [];
+
+		// Verify tokenization for each variable by checking XML contains {{name}}
+		let xmlForVerify = "";
+		try {
+			const bin = fs.readFileSync(sourceDocxPath, "binary");
+			const zip = new PizZip(bin);
+			const docXml = zip.file("word/document.xml");
+			xmlForVerify = docXml ? docXml.asText() : "";
+		} catch (_) {
+			xmlForVerify = "";
+		}
+		const verifyTokenized = (xml, v) =>
+			v && v.name && typeof xml === "string"
+				? xml.includes(`{{${v.name}}}`)
+				: false;
+
+		// Enrich image variables with computed extents if not provided
+		try {
+			const bin = fs.readFileSync(sourceDocxPath, "binary");
+			const zip = new PizZip(bin);
+			parsedVariables = parsedVariables.map((v) => {
+				if (
+					v &&
+					v.type === "image" &&
+					v.imageTarget &&
+					!v.imageExtent
+				) {
+					const ext = findExtentForTargetInZip(zip, v.imageTarget);
+					if (ext) v.imageExtent = ext;
+				}
+				return v;
+			});
+		} catch (_) {}
+
+		const template = new Template({
+			name,
+			description: description || "Imported Word template",
+			requiresKml: !!requiresKml,
+			createdBy: "system",
+			sections: [],
+			sourceDocxPath,
+			variables: parsedVariables.map((v) => ({
+				...v,
+				tokenized: verifyTokenized(xmlForVerify, v),
+			})),
+			variableGroups: Array.isArray(parsedGroups) ? parsedGroups : [],
+		});
+
+		// Build and store an unfilled PDF preview
+		try {
+			const sofficePrimary = resolveSofficePath();
+			await convertDocxToPdf(
+				sofficePrimary,
+				sourceDocxPath,
+				templatePreviewsDir
+			);
+			const baseName = path.basename(
+				sourceDocxPath,
+				path.extname(sourceDocxPath)
+			);
+			const previewPdf = path.join(
+				templatePreviewsDir,
+				`${baseName}.pdf`
+			);
+			if (fs.existsSync(previewPdf)) {
+				template.previewPdfPath = `/uploads/template-previews/${path.basename(
+					previewPdf
+				)}`;
+			}
+		} catch (e) {
+			console.warn("Failed to build template preview PDF:", e.message);
+		}
+
+		const saved = await template.save();
+		return res.status(201).json(saved);
+	} catch (error) {
+		return res.status(400).json({ message: error.message });
+	}
+});
 
 // Generate filled DOCX and optionally PDF
 app.post("/api/templates/:id/generate", async (req, res) => {
@@ -1970,13 +2184,33 @@ app.post("/api/templates/:id/preview-html", async (req, res) => {
 
 		const finalValues = { ...(values || {}) };
 		for (const v of template.variables || []) {
-			if (
-				v.type === "kml" &&
-				v.kmlField &&
-				finalValues[v.kmlField] &&
-				!finalValues[v.name]
-			) {
-				finalValues[v.name] = finalValues[v.kmlField];
+			if (v.type === "kml" && v.kmlField) {
+				let srcVal = undefined;
+				try {
+					if (
+						values &&
+						typeof values === "object" &&
+						values.kmlData &&
+						Object.prototype.hasOwnProperty.call(
+							values.kmlData,
+							v.kmlField
+						)
+					) {
+						srcVal = values.kmlData[v.kmlField];
+					}
+				} catch (_) {}
+				if (srcVal === undefined || srcVal === null) {
+					srcVal =
+						finalValues[v.kmlField] !== undefined &&
+						finalValues[v.kmlField] !== null
+							? finalValues[v.kmlField]
+							: finalValues[v.name];
+				}
+				if (srcVal !== undefined && srcVal !== null) {
+					const str = String(srcVal);
+					finalValues[v.kmlField] = str;
+					finalValues[v.name] = str;
+				}
 			}
 			if (v.type === "calculated" && v.expression) {
 				try {
