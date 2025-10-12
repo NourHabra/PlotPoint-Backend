@@ -1548,9 +1548,13 @@ app.post("/api/templates/finalize-import", async (req, res) => {
 app.post("/api/templates/:id/generate", async (req, res) => {
 	try {
 		const { id } = req.params;
-		const { values, output = "docx" } = req.body; // values: { [name]: value }
+		const { values, output = "docx", kmlData } = req.body || {}; // values: { [name]: value }
 		const template = await Template.findById(id);
-		return generateFromTemplate(template, values, output, res);
+		const mergedInput = {
+			...(values || {}),
+			...(kmlData ? { kmlData } : {}),
+		};
+		return generateFromTemplate(template, mergedInput, output, res);
 	} catch (error) {
 		console.error(error);
 		res.status(500).json({ message: error.message });
