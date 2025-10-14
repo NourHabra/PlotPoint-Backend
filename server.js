@@ -127,6 +127,127 @@ async function convertDocxToPdf(sofficePath, inputDocxPath, outputDir) {
 		} catch (_) {}
 	}
 }
+
+// Helper: build file URL for LibreOffice macro parameters
+function pathToFileUrl(p) {
+	const norm = String(p).replace(/\\/g, "/");
+	return `file:///${norm}`;
+}
+
+// Generic conversion helper using a temporary LO user profile
+async function convertWithSoffice(sofficePath, filter, inputPath, outputDir) {
+	const profileDir = path.join(outputDir, `lo-profile-${Date.now()}`);
+	try {
+		fs.mkdirSync(profileDir, { recursive: true });
+	} catch (_) {}
+	const profileUrl = `file:///${profileDir.replace(/\\/g, "/")}`;
+	const args = [
+		"--headless",
+		"--nocrashreport",
+		"--nolockcheck",
+		"--nodefault",
+		"--nologo",
+		"--norestore",
+		`-env:UserInstallation=${profileUrl}`,
+		"--convert-to",
+		filter,
+		"--outdir",
+		outputDir,
+		inputPath,
+	];
+	await new Promise((resolve, reject) => {
+		execFile(
+			sofficePath,
+			args,
+			{ windowsHide: true },
+			(err, stdout, stderr) => {
+				if (err) {
+					const detail =
+						(stderr && stderr.toString()) ||
+						(stdout && stdout.toString()) ||
+						err.message;
+					return reject(new Error(detail));
+				}
+				resolve();
+			}
+		);
+	});
+	try {
+		fs.rmSync(profileDir, { recursive: true, force: true });
+	} catch (_) {}
+}
+
+async function convertDocxToOdt(sofficePath, inputDocxPath, outputDir) {
+	await convertWithSoffice(sofficePath, "odt", inputDocxPath, outputDir);
+	const odtPath = path.join(
+		outputDir,
+		path.basename(inputDocxPath).replace(/\.docx$/i, ".odt")
+	);
+	return odtPath;
+}
+
+async function convertOdtToDocx(sofficePath, inputOdtPath, outputDir) {
+	await convertWithSoffice(sofficePath, "docx", inputOdtPath, outputDir);
+	const docxPath = path.join(
+		outputDir,
+		path.basename(inputOdtPath).replace(/\.odt$/i, ".docx")
+	);
+	return docxPath;
+}
+
+async function convertOdtToPdf(sofficePath, inputOdtPath, outputDir) {
+	await convertWithSoffice(
+		sofficePath,
+		"pdf:writer_pdf_Export",
+		inputOdtPath,
+		outputDir
+	);
+	const pdfPath = path.join(
+		outputDir,
+		path.basename(inputOdtPath).replace(/\.odt$/i, ".pdf")
+	);
+	return pdfPath;
+}
+
+// Run server-provided macro to refresh TOC/indexes directly on the DOCX
+async function refreshIndexesWithMacro(
+	sofficePath,
+	sourceDocxPath /*, workDir*/
+) {
+	console.log("Updating Indexes");
+	// Use default LO profile so the existing server macro is discoverable
+	const macroArg = `macro:///Standard.Module1.UpdateIndexes(${sourceDocxPath})`;
+	const args = [
+		"--headless",
+		"--nocrashreport",
+		"--nolockcheck",
+		"--nodefault",
+		"--nologo",
+		"--norestore",
+		macroArg,
+	];
+	try {
+		console.log("[gen][macro] command:", sofficePath, args.join(" "));
+	} catch (_) {}
+	await new Promise((resolve, reject) => {
+		execFile(
+			sofficePath,
+			args,
+			{ windowsHide: true },
+			(err, stdout, stderr) => {
+				if (err) {
+					const detail =
+						(stderr && stderr.toString()) ||
+						(stdout && stdout.toString()) ||
+						err.message;
+					return reject(new Error(detail));
+				}
+				resolve();
+			}
+		);
+	});
+	return { refreshedDocx: sourceDocxPath };
+}
 // Storage for uploaded templates
 const uploadsDir = path.join(__dirname, "uploads");
 if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir);
@@ -910,12 +1031,25 @@ async function generateFromTemplate(template, inputValues, output, res) {
 			.status(400)
 			.json({ message: "Template was not imported from DOCX" });
 
+	try {
+		console.log("[gen] start", {
+			templateId: String(template._id || ""),
+			output,
+			sourceDocxPath: template.sourceDocxPath,
+			keys: Object.keys(inputValues || {}),
+		});
+	} catch (_) {}
+
 	// Load DOCX file
 	const content = fs.readFileSync(template.sourceDocxPath, "binary");
+	try {
+		console.log("[gen] loaded template docx");
+	} catch (_) {}
 	const zip = new PizZip(content);
 
 	// Inject images for image variables before text rendering
 	try {
+		console.log("[gen] inject images (inline variables)");
 		const mediaPrefix = "word/media/";
 		for (const v of template.variables || []) {
 			if (v.type !== "image") continue;
@@ -971,7 +1105,10 @@ async function generateFromTemplate(template, inputValues, output, res) {
 			} catch (_) {}
 			zip.file(target, finalBuf);
 		}
-	} catch (_) {}
+		console.log("[gen] image injection done");
+	} catch (e) {
+		console.log("[gen] image injection skipped", e && e.message);
+	}
 	const doc = new Docxtemplater(zip, {
 		paragraphLoop: true,
 		linebreaks: true,
@@ -984,6 +1121,9 @@ async function generateFromTemplate(template, inputValues, output, res) {
 
 	// Build final values map and evaluate calculateds; map KML aliases
 	const finalValues = { ...(inputValues || {}) };
+	try {
+		console.log("[gen] map kml/calculated values");
+	} catch (_) {}
 	for (const v of template.variables || []) {
 		if (v.type === "kml" && v.kmlField) {
 			let srcVal = undefined;
@@ -1033,7 +1173,9 @@ async function generateFromTemplate(template, inputValues, output, res) {
 	});
 	try {
 		doc.render(finalValues);
+		console.log("[gen] render ok");
 	} catch (error) {
+		console.log("[gen] render failed", error && error.message);
 		return res.status(400).json({
 			message: "Template rendering failed",
 			detail: error.message,
@@ -1043,13 +1185,41 @@ async function generateFromTemplate(template, inputValues, output, res) {
 	// Ensure TOC and other fields refresh on open
 	try {
 		enableUpdateFieldsOnOpen(zip);
+		console.log("[gen] enabled updateFieldsOnOpen");
 	} catch (_) {}
 
 	const buf = doc.getZip().generate({ type: "nodebuffer" });
 	const outDocx = path.join(uploadsDir, `out-${Date.now()}.docx`);
 	fs.writeFileSync(outDocx, buf);
+	try {
+		console.log("[gen] wrote docx", outDocx);
+	} catch (_) {}
+
+	// Last step: refresh TOC/indexes via server macro (directly on DOCX)
+	try {
+		const soffice = resolveSofficePath();
+		console.log("[gen] refresh indexes via macro", soffice);
+		const { refreshedDocx } = await refreshIndexesWithMacro(
+			soffice,
+			outDocx,
+			uploadsDir
+		);
+		// Replace outDocx with refreshed version for subsequent export/stream
+		if (refreshedDocx && fs.existsSync(refreshedDocx)) {
+			const same = path.resolve(refreshedDocx) === path.resolve(outDocx);
+			if (!same) {
+				// Overwrite without deleting first to avoid race with macro
+				fs.copyFileSync(refreshedDocx, outDocx);
+			}
+			console.log("[gen] indexes refreshed");
+		}
+	} catch (e) {
+		// Non-fatal: continue without refreshed indexes
+		console.log("[gen] macro refresh failed", e && e.message);
+	}
 
 	if (output === "pdf") {
+		console.log("[gen] converting to pdf");
 		const sofficePrimary = resolveSofficePath();
 		// Preflight: verify soffice is reachable (supports PATH)
 		try {
@@ -1073,6 +1243,7 @@ async function generateFromTemplate(template, inputValues, output, res) {
 		let convertError = null;
 		try {
 			await convertDocxToPdf(sofficePrimary, outDocx, outDir);
+			console.log("[gen] pdf converted (primary)");
 		} catch (e1) {
 			convertError = e1;
 			// On Windows, retry with explicit soffice.com if available
@@ -1091,6 +1262,7 @@ async function generateFromTemplate(template, inputValues, output, res) {
 					try {
 						await convertDocxToPdf(alt, outDocx, outDir);
 						convertError = null;
+						console.log("[gen] pdf converted (fallback)");
 					} catch (e2) {
 						convertError = e2;
 					}
@@ -1108,6 +1280,7 @@ async function generateFromTemplate(template, inputValues, output, res) {
 			});
 		}
 		const outPdf = outDocx.replace(/\.docx$/, ".pdf");
+		console.log("[gen] streaming pdf", outPdf);
 		res.setHeader("Content-Type", "application/pdf");
 		res.setHeader("Content-Disposition", `attachment; filename=report.pdf`);
 		const pdfStream = fs.createReadStream(outPdf);
@@ -1133,6 +1306,7 @@ async function generateFromTemplate(template, inputValues, output, res) {
 		"application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 	);
 	res.setHeader("Content-Disposition", `attachment; filename=report.docx`);
+	console.log("[gen] streaming docx", outDocx);
 	const docxStream = fs.createReadStream(outDocx);
 	docxStream.pipe(res);
 	const cleanupDocx = () => {
