@@ -13,6 +13,63 @@ const fetch = require("node-fetch");
 const sharp = require("sharp");
 require("dotenv").config();
 
+// Robust recursive delete utilities (handle Windows EPERM/EBUSY cases)
+function tryUnlinkFile(targetFile) {
+	try {
+		if (!targetFile) return;
+		if (!fs.existsSync(targetFile)) return;
+		try {
+			fs.chmodSync(targetFile, 0o666);
+		} catch (_) {}
+		try {
+			fs.unlinkSync(targetFile);
+			try {
+				console.log("[appendix][delete:file]", targetFile);
+			} catch (_) {}
+		} catch (e1) {
+			try {
+				console.log(
+					"[appendix][delete:file failed]",
+					targetFile,
+					e1 && e1.message
+				);
+			} catch (_) {}
+		}
+	} catch (_) {}
+}
+
+function forceRemoveSync(targetPath) {
+	try {
+		if (!targetPath) return;
+		const resolved = path.resolve(targetPath);
+		try {
+			fs.rmSync(resolved, { recursive: true, force: true });
+			try {
+				console.log("[appendix][delete:dir]", resolved);
+			} catch (_) {}
+			return;
+		} catch (e) {
+			// Fallback: manual walk
+			try {
+				const stat = fs.statSync(resolved);
+				if (stat.isDirectory()) {
+					try {
+						const entries = fs.readdirSync(resolved);
+						for (const entry of entries) {
+							forceRemoveSync(path.join(resolved, entry));
+						}
+					} catch (_) {}
+					try {
+						fs.rmdirSync(resolved);
+					} catch (_) {}
+				} else {
+					tryUnlinkFile(resolved);
+				}
+			} catch (_) {}
+		}
+	} catch (_) {}
+}
+
 const app = express();
 const PORT = process.env.PORT || 5000;
 
@@ -2336,17 +2393,27 @@ app.post(
 					continue;
 				}
 				// Create item folder under /uploads/appendix/<reportId>/<itemId>
-				const itemId = `${Date.now()}-${Math.random()
-					.toString(36)
-					.slice(2, 8)}`;
+				const newObjectId = new mongoose.Types.ObjectId();
 				const itemDir = path.join(
 					appendixBaseDir,
 					String(report._id),
-					itemId
+					String(newObjectId)
 				);
 				ensureDirSync(itemDir);
+				try {
+					console.log(
+						"[appendix][upload] report:",
+						String(report._id),
+						"item:",
+						String(newObjectId),
+						"dir:",
+						itemDir,
+						"kind:",
+						isPdf ? "pdf" : isImage ? "image" : "unknown"
+					);
+				} catch (_) {}
 				let itemDoc = {
-					_id: new mongoose.Types.ObjectId(),
+					_id: newObjectId,
 					kind: isPdf ? "pdf" : "image",
 					originalName,
 					originalPath: "",
@@ -2374,6 +2441,14 @@ app.post(
 							.toFile(th);
 						itemDoc.thumbPath = th;
 					} catch (_) {}
+					try {
+						console.log("[appendix][upload] saved image:", dest);
+						if (itemDoc.thumbPath)
+							console.log(
+								"[appendix][upload] thumb:",
+								itemDoc.thumbPath
+							);
+					} catch (_) {}
 					outItems.push(itemDoc);
 				} else if (isPdf) {
 					const pdfPath = path.join(itemDir, `original${ext}`);
@@ -2400,6 +2475,19 @@ app.post(
 								.toFile(th);
 							itemDoc.thumbPath = th;
 						}
+					} catch (_) {}
+					try {
+						console.log("[appendix][upload] saved pdf:", pdfPath);
+						console.log(
+							"[appendix][upload] pages:",
+							imgs.length,
+							pagesDir
+						);
+						if (itemDoc.thumbPath)
+							console.log(
+								"[appendix][upload] thumb:",
+								itemDoc.thumbPath
+							);
 					} catch (_) {}
 					outItems.push(itemDoc);
 				}
@@ -2469,22 +2557,76 @@ app.delete("/api/reports/:id/appendix/:itemId", async (req, res) => {
 		const [removed] = items.splice(idx, 1);
 		report.appendixItems = items;
 		await report.save();
-		// Delete files on disk
+		// Delete files on disk (derive directory from stored file paths for robustness)
 		try {
-			const itemDir = path.join(
-				appendixBaseDir,
-				String(report._id),
-				removed._id ? String(removed._id) : ""
+			const reportRoot = path.resolve(
+				path.join(appendixBaseDir, String(report._id))
 			);
-			fs.rmSync(itemDir, { recursive: true, force: true });
+			try {
+				console.log(
+					"[appendix][delete] report:",
+					String(report._id),
+					"item:",
+					String((removed && removed._id) || "")
+				);
+			} catch (_) {}
+			const candidates = [];
+			if (removed && removed.originalPath)
+				candidates.push(path.dirname(removed.originalPath));
+			if (removed && removed.thumbPath)
+				candidates.push(path.dirname(removed.thumbPath));
+			// also try folder by _id (new schema)
+			if (removed && removed._id)
+				candidates.push(path.join(reportRoot, String(removed._id)));
+			const tried = new Set();
+			for (const c of candidates) {
+				if (!c) continue;
+				const target = path.resolve(c);
+				if (tried.has(target)) continue;
+				tried.add(target);
+				if (!target.startsWith(reportRoot)) continue; // safety guard
+				try {
+					forceRemoveSync(target);
+				} catch (e) {
+					try {
+						console.log(
+							"[appendix][delete] rm failed:",
+							target,
+							e && e.message
+						);
+					} catch (_) {}
+				}
+			}
+			// Extra: delete individual files if any remain (legacy layouts)
+			try {
+				if (
+					removed &&
+					removed.originalPath &&
+					fs.existsSync(removed.originalPath)
+				)
+					fs.unlinkSync(removed.originalPath);
+			} catch (_) {}
+			try {
+				if (
+					removed &&
+					removed.thumbPath &&
+					fs.existsSync(removed.thumbPath)
+				)
+					fs.unlinkSync(removed.thumbPath);
+			} catch (_) {}
+			try {
+				if (removed && Array.isArray(removed.pageImages)) {
+					for (const p of removed.pageImages) {
+						try {
+							if (p && fs.existsSync(p)) fs.unlinkSync(p);
+						} catch (_) {}
+					}
+				}
+			} catch (_) {}
 			// If no appendix items remain, remove the report's appendix directory
 			if (!report.appendixItems || report.appendixItems.length === 0) {
-				const reportDir = path.join(
-					appendixBaseDir,
-					String(report._id)
-				);
 				try {
-					fs.rmSync(reportDir, { recursive: true, force: true });
+					fs.rmSync(reportRoot, { recursive: true, force: true });
 				} catch (_) {}
 			}
 		} catch (_) {}
@@ -2699,14 +2841,32 @@ app.delete("/api/reports/:id", async (req, res) => {
 				.json({ message: "Submitted reports cannot be deleted" });
 		}
 		const imageUrls = collectLocalImageUrls(report.values || {});
-		await Report.findByIdAndDelete(req.params.id);
-		// Remove appendix directory for this report
+		// Remove appendix directory for this report first (regardless of items)
 		try {
-			const reportAppendixDir = path.join(
-				appendixBaseDir,
-				String(report._id)
+			const reportAppendixDir = path.resolve(
+				path.join(appendixBaseDir, String(report._id))
 			);
-			fs.rmSync(reportAppendixDir, { recursive: true, force: true });
+			const appendixBase = path.resolve(appendixBaseDir);
+			if (
+				reportAppendixDir.startsWith(appendixBase) &&
+				fs.existsSync(reportAppendixDir)
+			) {
+				forceRemoveSync(reportAppendixDir);
+			}
+		} catch (_) {}
+		await Report.findByIdAndDelete(req.params.id);
+		// Remove appendix directory for this report (again, post-delete)
+		try {
+			const reportAppendixDir = path.resolve(
+				path.join(appendixBaseDir, String(report._id))
+			);
+			const appendixBase = path.resolve(appendixBaseDir);
+			if (
+				reportAppendixDir.startsWith(appendixBase) &&
+				fs.existsSync(reportAppendixDir)
+			) {
+				forceRemoveSync(reportAppendixDir);
+			}
 		} catch (_) {}
 		// Attempt to delete any images no longer referenced by any report
 		try {
