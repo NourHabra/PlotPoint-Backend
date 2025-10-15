@@ -95,6 +95,7 @@ const Report = require("./models/Report");
 const Ticket = require("./models/Ticket");
 const User = require("./models/User");
 const UserTemplate = require("./models/UserTemplate");
+const ChangeLog = require("./models/ChangeLog");
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
 
@@ -3101,4 +3102,88 @@ app.patch("/api/templates/:id/reactivate", async (req, res) => {
 // Start server
 app.listen(PORT, () => {
 	console.log(`Server is running on port ${PORT}`);
+});
+
+// ----- Changelog APIs -----
+// List changelog entries (newest first)
+app.get("/api/changelog", async (req, res) => {
+	try {
+		const items = await ChangeLog.find({})
+			.sort({ date: -1, createdAt: -1 })
+			.lean();
+		return res.json(items);
+	} catch (error) {
+		return res.status(500).json({ message: error.message });
+	}
+});
+
+// Create changelog entry (admin only)
+app.post("/api/changelog", async (req, res) => {
+	try {
+		const payload = getAuthPayload(req);
+		if (!payload) return res.status(401).json({ message: "Unauthorized" });
+		if (payload.role !== "Admin")
+			return res
+				.status(403)
+				.json({ message: "Admin privileges required" });
+		const { title, description, date } = req.body || {};
+		if (!title || !description || !date)
+			return res
+				.status(400)
+				.json({ message: "title, description, date are required" });
+		const item = new ChangeLog({
+			title,
+			description,
+			date: new Date(date),
+			createdBy: String(payload.sub || payload.email),
+		});
+		const saved = await item.save();
+		return res.status(201).json(saved);
+	} catch (error) {
+		return res.status(400).json({ message: error.message });
+	}
+});
+
+// Update changelog entry (admin only)
+app.put("/api/changelog/:id", async (req, res) => {
+	try {
+		const payload = getAuthPayload(req);
+		if (!payload) return res.status(401).json({ message: "Unauthorized" });
+		if (payload.role !== "Admin")
+			return res
+				.status(403)
+				.json({ message: "Admin privileges required" });
+		const { id } = req.params;
+		const { title, description, date, disabled } = req.body || {};
+		const updates = {};
+		if (typeof title === "string") updates.title = title;
+		if (typeof description === "string") updates.description = description;
+		if (date) updates.date = new Date(date);
+		if (typeof disabled === "boolean") updates.disabled = disabled;
+		const saved = await ChangeLog.findByIdAndUpdate(id, updates, {
+			new: true,
+		});
+		if (!saved) return res.status(404).json({ message: "Not found" });
+		return res.json(saved);
+	} catch (error) {
+		return res.status(400).json({ message: error.message });
+	}
+});
+
+// Delete changelog entry (admin only)
+app.delete("/api/changelog/:id", async (req, res) => {
+	try {
+		const payload = getAuthPayload(req);
+		if (!payload) return res.status(401).json({ message: "Unauthorized" });
+		if (payload.role !== "Admin")
+			return res
+				.status(403)
+				.json({ message: "Admin privileges required" });
+		const { id } = req.params;
+		const existed = await ChangeLog.findByIdAndDelete(id);
+		if (!existed) return res.status(404).json({ message: "Not found" });
+		return res.json({ ok: true });
+	} catch (error) {
+		return res.status(400).json({ message: error.message });
+	}
 });
