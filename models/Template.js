@@ -109,7 +109,14 @@ const templateSchema = new mongoose.Schema(
 					name: { type: String, required: true },
 					type: {
 						type: String,
-						enum: ["text", "kml", "image", "select", "calculated"],
+						enum: [
+							"text",
+							"kml",
+							"image",
+							"select",
+							"date",
+							"calculated",
+						],
 						required: true,
 					},
 					description: { type: String },

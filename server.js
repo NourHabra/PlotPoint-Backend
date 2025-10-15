@@ -13,6 +13,63 @@ const fetch = require("node-fetch");
 const sharp = require("sharp");
 require("dotenv").config();
 
+// Robust recursive delete utilities (handle Windows EPERM/EBUSY cases)
+function tryUnlinkFile(targetFile) {
+	try {
+		if (!targetFile) return;
+		if (!fs.existsSync(targetFile)) return;
+		try {
+			fs.chmodSync(targetFile, 0o666);
+		} catch (_) {}
+		try {
+			fs.unlinkSync(targetFile);
+			try {
+				console.log("[appendix][delete:file]", targetFile);
+			} catch (_) {}
+		} catch (e1) {
+			try {
+				console.log(
+					"[appendix][delete:file failed]",
+					targetFile,
+					e1 && e1.message
+				);
+			} catch (_) {}
+		}
+	} catch (_) {}
+}
+
+function forceRemoveSync(targetPath) {
+	try {
+		if (!targetPath) return;
+		const resolved = path.resolve(targetPath);
+		try {
+			fs.rmSync(resolved, { recursive: true, force: true });
+			try {
+				console.log("[appendix][delete:dir]", resolved);
+			} catch (_) {}
+			return;
+		} catch (e) {
+			// Fallback: manual walk
+			try {
+				const stat = fs.statSync(resolved);
+				if (stat.isDirectory()) {
+					try {
+						const entries = fs.readdirSync(resolved);
+						for (const entry of entries) {
+							forceRemoveSync(path.join(resolved, entry));
+						}
+					} catch (_) {}
+					try {
+						fs.rmdirSync(resolved);
+					} catch (_) {}
+				} else {
+					tryUnlinkFile(resolved);
+				}
+			} catch (_) {}
+		}
+	} catch (_) {}
+}
+
 const app = express();
 const PORT = process.env.PORT || 5000;
 
@@ -38,6 +95,7 @@ const Report = require("./models/Report");
 const Ticket = require("./models/Ticket");
 const User = require("./models/User");
 const UserTemplate = require("./models/UserTemplate");
+const ChangeLog = require("./models/ChangeLog");
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
 
@@ -127,16 +185,151 @@ async function convertDocxToPdf(sofficePath, inputDocxPath, outputDir) {
 		} catch (_) {}
 	}
 }
+
+// Helper: build file URL for LibreOffice macro parameters
+function pathToFileUrl(p) {
+	const norm = String(p).replace(/\\/g, "/");
+	return `file:///${norm}`;
+}
+
+// Build encoded file URL (safe for spaces and most characters)
+function pathToEncodedFileUrl(p) {
+	return encodeURI(pathToFileUrl(p));
+}
+
+// Generic conversion helper using a temporary LO user profile
+async function convertWithSoffice(sofficePath, filter, inputPath, outputDir) {
+	const profileDir = path.join(outputDir, `lo-profile-${Date.now()}`);
+	try {
+		fs.mkdirSync(profileDir, { recursive: true });
+	} catch (_) {}
+	const profileUrl = `file:///${profileDir.replace(/\\/g, "/")}`;
+	const args = [
+		"--headless",
+		"--nocrashreport",
+		"--nolockcheck",
+		"--nodefault",
+		"--nologo",
+		"--norestore",
+		`-env:UserInstallation=${profileUrl}`,
+		"--convert-to",
+		filter,
+		"--outdir",
+		outputDir,
+		inputPath,
+	];
+	await new Promise((resolve, reject) => {
+		execFile(
+			sofficePath,
+			args,
+			{ windowsHide: true },
+			(err, stdout, stderr) => {
+				if (err) {
+					const detail =
+						(stderr && stderr.toString()) ||
+						(stdout && stdout.toString()) ||
+						err.message;
+					return reject(new Error(detail));
+				}
+				resolve();
+			}
+		);
+	});
+	try {
+		fs.rmSync(profileDir, { recursive: true, force: true });
+	} catch (_) {}
+}
+
+async function convertDocxToOdt(sofficePath, inputDocxPath, outputDir) {
+	await convertWithSoffice(sofficePath, "odt", inputDocxPath, outputDir);
+	const odtPath = path.join(
+		outputDir,
+		path.basename(inputDocxPath).replace(/\.docx$/i, ".odt")
+	);
+	return odtPath;
+}
+
+async function convertOdtToDocx(sofficePath, inputOdtPath, outputDir) {
+	await convertWithSoffice(sofficePath, "docx", inputOdtPath, outputDir);
+	const docxPath = path.join(
+		outputDir,
+		path.basename(inputOdtPath).replace(/\.odt$/i, ".docx")
+	);
+	return docxPath;
+}
+
+async function convertOdtToPdf(sofficePath, inputOdtPath, outputDir) {
+	await convertWithSoffice(
+		sofficePath,
+		"pdf:writer_pdf_Export",
+		inputOdtPath,
+		outputDir
+	);
+	const pdfPath = path.join(
+		outputDir,
+		path.basename(inputOdtPath).replace(/\.odt$/i, ".pdf")
+	);
+	return pdfPath;
+}
+
+// Run server-provided macro to refresh TOC/indexes directly on the DOCX
+async function refreshIndexesWithMacro(
+	sofficePath,
+	sourceDocxPath /*, workDir*/
+) {
+	console.log("Updating Indexes");
+	// Use default LO profile so the existing server macro is discoverable
+	const macroArg = `macro:///Standard.Module1.UpdateIndexes(${sourceDocxPath})`;
+	const args = [
+		"--headless",
+		"--nocrashreport",
+		"--nolockcheck",
+		"--nodefault",
+		"--nologo",
+		"--norestore",
+		macroArg,
+	];
+	try {
+		console.log("[gen][macro] command:", sofficePath, args.join(" "));
+	} catch (_) {}
+	await new Promise((resolve, reject) => {
+		execFile(
+			sofficePath,
+			args,
+			{ windowsHide: true },
+			(err, stdout, stderr) => {
+				if (err) {
+					const detail =
+						(stderr && stderr.toString()) ||
+						(stdout && stdout.toString()) ||
+						err.message;
+					return reject(new Error(detail));
+				}
+				resolve();
+			}
+		);
+	});
+	return { refreshedDocx: sourceDocxPath };
+}
 // Storage for uploaded templates
 const uploadsDir = path.join(__dirname, "uploads");
 if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir);
 const templatePreviewsDir = path.join(uploadsDir, "template-previews");
 const imagesDir = path.join(uploadsDir, "images");
+// Appendix storage base
+const appendixBaseDir = path.join(uploadsDir, "appendix");
+const appendixTmpDir = path.join(appendixBaseDir, "tmp");
 try {
 	fs.mkdirSync(templatePreviewsDir, { recursive: true });
 } catch (_) {}
 try {
 	fs.mkdirSync(imagesDir, { recursive: true });
+} catch (_) {}
+try {
+	fs.mkdirSync(appendixBaseDir, { recursive: true });
+} catch (_) {}
+try {
+	fs.mkdirSync(appendixTmpDir, { recursive: true });
 } catch (_) {}
 
 const storage = multer.diskStorage({
@@ -178,12 +371,139 @@ const avatarStorage = multer.diskStorage({
 });
 const uploadAvatar = multer({ storage: avatarStorage });
 
+// Storage for appendix uploads (temporary, moved per-item after processing)
+const appendixStorage = multer.diskStorage({
+	destination: function (req, file, cb) {
+		cb(null, appendixTmpDir);
+	},
+	filename: function (req, file, cb) {
+		const unique = Date.now() + "-" + Math.round(Math.random() * 1e9);
+		cb(null, unique + path.extname(file.originalname));
+	},
+});
+const uploadAppendix = multer({ storage: appendixStorage });
+
+function ensureDirSync(dir) {
+	try {
+		fs.mkdirSync(dir, { recursive: true });
+	} catch (_) {}
+}
+
+function toAppendixUrl(fullPath) {
+	try {
+		const rel = path
+			.relative(appendixBaseDir, fullPath)
+			.replace(/\\/g, "/");
+		return `/uploads/appendix/${rel}`;
+	} catch (_) {
+		return "";
+	}
+}
+
+async function runPdftoppmToPng(inputPdfPath, pagesDir, baseName, dpi) {
+	return new Promise((resolve, reject) => {
+		ensureDirSync(pagesDir);
+		const args = [
+			"-png",
+			"-r",
+			String(dpi || 200),
+			inputPdfPath,
+			path.join(pagesDir, baseName),
+		];
+		execFile(
+			"pdftoppm",
+			args,
+			{ windowsHide: true },
+			(err, stdout, stderr) => {
+				if (err) {
+					const detail =
+						(stderr && String(stderr)) ||
+						(stdout && String(stdout)) ||
+						err.message;
+					return reject(new Error(detail));
+				}
+				try {
+					const files = fs
+						.readdirSync(pagesDir)
+						.filter(
+							(f) =>
+								f.startsWith(`${baseName}-`) &&
+								f.toLowerCase().endsWith(".png")
+						)
+						.sort((a, b) => {
+							const na =
+								parseInt(
+									a.replace(/^.*-(\d+)\.png$/i, "$1"),
+									10
+								) || 0;
+							const nb =
+								parseInt(
+									b.replace(/^.*-(\d+)\.png$/i, "$1"),
+									10
+								) || 0;
+							return na - nb;
+						});
+					const abs = files.map((f) => path.join(pagesDir, f));
+					resolve(abs);
+				} catch (e) {
+					reject(e);
+				}
+			}
+		);
+	});
+}
+
+async function appendImageToDocWithMacro(
+	sofficePath,
+	imagePath,
+	targetDocxPath
+) {
+	const imgUrl = pathToEncodedFileUrl(imagePath);
+	const docUrl = pathToEncodedFileUrl(targetDocxPath);
+	// Note: do NOT wrap macro arg in quotes; execFile does not use a shell
+	const macroArg = `macro:///Standard.Insert.InsertPhotoSaveAndClose_FitToPage(${imgUrl},${docUrl})`;
+	const args = [
+		"--headless",
+		"--invisible",
+		"--nologo",
+		"--norestore",
+		macroArg,
+	];
+	try {
+		console.log(`[appendix][cmd] ${sofficePath} ${args.join(" ")}`);
+	} catch (_) {}
+	await new Promise((resolve, reject) => {
+		execFile(
+			sofficePath,
+			args,
+			{ windowsHide: true },
+			(err, stdout, stderr) => {
+				if (err) {
+					const detail =
+						(stderr && String(stderr)) ||
+						(stdout && String(stdout)) ||
+						err.message;
+					return reject(new Error(detail));
+				}
+				try {
+					console.log(
+						`[appendix][ok] ${sofficePath} ${args.join(" ")}`
+					);
+				} catch (_) {}
+				resolve();
+			}
+		);
+	});
+}
+
 // Serve avatars as static assets
 app.use("/uploads/avatars", express.static(avatarsDir));
 // Serve template preview PDFs
 app.use("/uploads/template-previews", express.static(templatePreviewsDir));
 // Serve uploaded images for variables
 app.use("/uploads/images", express.static(imagesDir));
+// Serve appendix assets
+app.use("/uploads/appendix", express.static(appendixBaseDir));
 // Helper: resolve an image buffer from provided value (data URL, absolute URL, or local uploads path)
 async function resolveImageBuffer(provided) {
 	try {
@@ -518,6 +838,97 @@ app.get("/", (req, res) => {
 	res.json({ message: "Template API is running" });
 });
 
+// Analyze an already tokenized DOCX: extract variable tokens and media placeholders
+app.post(
+	"/api/templates/analyze-docx",
+	upload.single("file"),
+	async (req, res) => {
+		try {
+			if (!req.file)
+				return res.status(400).json({ message: "file is required" });
+			const bin = fs.readFileSync(req.file.path, "binary");
+			const zip = new PizZip(bin);
+			// Collect tokens across all word parts
+			const xmlPaths = Object.keys(zip.files || {}).filter(
+				(k) =>
+					k.startsWith("word/") &&
+					k.endsWith(".xml") &&
+					!k.includes("/_rels/")
+			);
+			const tokenSet = new Set();
+			const canonicalSet = new Set();
+			for (const p of xmlPaths) {
+				const f = zip.file(p);
+				if (!f) continue;
+				const xml = f.asText();
+				// Match tokens even if split by XML tags within the braces
+				const re = /\{\{\s*([\s\S]*?)\s*\}\}/g;
+				const decodeXmlEntities = (s) =>
+					String(s || "")
+						.replace(/&amp;/g, "&")
+						.replace(/&lt;/g, "<")
+						.replace(/&gt;/g, ">")
+						.replace(/&quot;/g, '"')
+						.replace(/&apos;/g, "'")
+						.replace(/&#([0-9]+);/g, (_, n) =>
+							String.fromCharCode(parseInt(n, 10))
+						)
+						.replace(/&#x([0-9a-fA-F]+);/g, (_, n) =>
+							String.fromCharCode(parseInt(n, 16))
+						);
+				let m;
+				while ((m = re.exec(xml))) {
+					const inner = String(m[1] || "");
+					// Decode entities first, then remove XML tags that may be interleaved
+					const decodedFirst = decodeXmlEntities(inner);
+					const withoutTags = decodedFirst.replace(/<[^>]*>/g, "");
+					// Normalize whitespace and remove NBSP
+					const cleaned = withoutTags.replace(/\u00A0/g, " ");
+					const name = cleaned.replace(/\s+/g, " ").trim();
+					if (!name) continue;
+					// Guard against any residual markup sneaking through
+					if (/[<>]/.test(name)) continue;
+					const canonical = name.toLowerCase();
+					if (canonicalSet.has(canonical)) continue;
+					canonicalSet.add(canonical);
+					tokenSet.add(name);
+				}
+			}
+			// Enumerate media placeholders
+			const media = Object.keys(zip.files || {})
+				.filter((k) => k.startsWith("word/media/") && !zip.files[k].dir)
+				.map((target) => {
+					const extent =
+						findExtentForTargetInZip(zip, target) || null;
+					return {
+						target,
+						extent,
+						fileName: path.basename(target),
+					};
+				});
+			const variables = Array.from(tokenSet).map((name) => ({
+				id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+				name,
+			}));
+			return res.status(200).json({
+				uploadedPath: req.file.path,
+				variables,
+				media,
+			});
+		} catch (error) {
+			// On parse errors, still succeed with uploadedPath so the flow can continue
+			return res.status(200).json({
+				uploadedPath:
+					req && req.file && req.file.path ? req.file.path : "",
+				variables: [],
+				media: [],
+				message:
+					"Analyze failed; proceeding with empty variables and media",
+			});
+		}
+	}
+);
+
 function getAuthPayload(req) {
 	const auth = req.headers.authorization || "";
 	const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
@@ -791,10 +1202,13 @@ app.patch("/api/user-templates/:id", async (req, res) => {
 			String(doc.userId) === String(payload.sub || payload.email);
 		if (!isOwner && payload.role !== "Admin")
 			return res.status(403).json({ message: "Forbidden" });
-		const { variableTextTemplates, checklist } = req.body || {};
+		const { variableTextTemplates, variableSelectOptions, checklist } =
+			req.body || {};
 		const updates = {};
 		if (Array.isArray(variableTextTemplates))
 			updates.variableTextTemplates = variableTextTemplates;
+		if (Array.isArray(variableSelectOptions))
+			updates.variableSelectOptions = variableSelectOptions;
 		if (Array.isArray(checklist)) updates.checklist = checklist;
 		const updated = await UserTemplate.findByIdAndUpdate(
 			req.params.id,
@@ -808,7 +1222,13 @@ app.patch("/api/user-templates/:id", async (req, res) => {
 });
 
 // Shared generator used by template and report routes
-async function generateFromTemplate(template, inputValues, output, res) {
+async function generateFromTemplate(
+	template,
+	inputValues,
+	output,
+	res,
+	options
+) {
 	if (!template)
 		return res.status(404).json({ message: "Template not found" });
 	if (!template.sourceDocxPath)
@@ -816,12 +1236,25 @@ async function generateFromTemplate(template, inputValues, output, res) {
 			.status(400)
 			.json({ message: "Template was not imported from DOCX" });
 
+	try {
+		console.log("[gen] start", {
+			templateId: String(template._id || ""),
+			output,
+			sourceDocxPath: template.sourceDocxPath,
+			keys: Object.keys(inputValues || {}),
+		});
+	} catch (_) {}
+
 	// Load DOCX file
 	const content = fs.readFileSync(template.sourceDocxPath, "binary");
+	try {
+		console.log("[gen] loaded template docx");
+	} catch (_) {}
 	const zip = new PizZip(content);
 
 	// Inject images for image variables before text rendering
 	try {
+		console.log("[gen] inject images (inline variables)");
 		const mediaPrefix = "word/media/";
 		for (const v of template.variables || []) {
 			if (v.type !== "image") continue;
@@ -877,7 +1310,10 @@ async function generateFromTemplate(template, inputValues, output, res) {
 			} catch (_) {}
 			zip.file(target, finalBuf);
 		}
-	} catch (_) {}
+		console.log("[gen] image injection done");
+	} catch (e) {
+		console.log("[gen] image injection skipped", e && e.message);
+	}
 	const doc = new Docxtemplater(zip, {
 		paragraphLoop: true,
 		linebreaks: true,
@@ -890,14 +1326,37 @@ async function generateFromTemplate(template, inputValues, output, res) {
 
 	// Build final values map and evaluate calculateds; map KML aliases
 	const finalValues = { ...(inputValues || {}) };
+	try {
+		console.log("[gen] map kml/calculated values");
+	} catch (_) {}
 	for (const v of template.variables || []) {
-		if (
-			v.type === "kml" &&
-			v.kmlField &&
-			finalValues[v.kmlField] &&
-			!finalValues[v.name]
-		) {
-			finalValues[v.name] = finalValues[v.kmlField];
+		if (v.type === "kml" && v.kmlField) {
+			let srcVal = undefined;
+			try {
+				if (
+					inputValues &&
+					typeof inputValues === "object" &&
+					inputValues.kmlData &&
+					Object.prototype.hasOwnProperty.call(
+						inputValues.kmlData,
+						v.kmlField
+					)
+				) {
+					srcVal = inputValues.kmlData[v.kmlField];
+				}
+			} catch (_) {}
+			if (srcVal === undefined || srcVal === null) {
+				srcVal =
+					finalValues[v.kmlField] !== undefined &&
+					finalValues[v.kmlField] !== null
+						? finalValues[v.kmlField]
+						: finalValues[v.name];
+			}
+			if (srcVal !== undefined && srcVal !== null) {
+				const str = String(srcVal);
+				finalValues[v.kmlField] = str;
+				finalValues[v.name] = str;
+			}
 		}
 		if (v.type === "calculated" && v.expression) {
 			try {
@@ -919,7 +1378,9 @@ async function generateFromTemplate(template, inputValues, output, res) {
 	});
 	try {
 		doc.render(finalValues);
+		console.log("[gen] render ok");
 	} catch (error) {
+		console.log("[gen] render failed", error && error.message);
 		return res.status(400).json({
 			message: "Template rendering failed",
 			detail: error.message,
@@ -929,13 +1390,79 @@ async function generateFromTemplate(template, inputValues, output, res) {
 	// Ensure TOC and other fields refresh on open
 	try {
 		enableUpdateFieldsOnOpen(zip);
+		console.log("[gen] enabled updateFieldsOnOpen");
 	} catch (_) {}
 
 	const buf = doc.getZip().generate({ type: "nodebuffer" });
 	const outDocx = path.join(uploadsDir, `out-${Date.now()}.docx`);
 	fs.writeFileSync(outDocx, buf);
+	try {
+		console.log("[gen] wrote docx", outDocx);
+	} catch (_) {}
+
+	// Last step: refresh TOC/indexes via server macro (directly on DOCX)
+	try {
+		const soffice = resolveSofficePath();
+		// Append appendix items first (in desired order)
+		try {
+			const items =
+				options && Array.isArray(options.appendixItems)
+					? options.appendixItems
+					: [];
+			if (items.length > 0) {
+				console.log("[gen] appending appendix items:", items.length);
+				const sorted = items
+					.slice()
+					.sort(
+						(a, b) => Number(a.order || 0) - Number(b.order || 0)
+					);
+				for (const it of sorted) {
+					if (!it || !it.kind) continue;
+					if (it.kind === "image" && it.originalPath) {
+						await appendImageToDocWithMacro(
+							soffice,
+							it.originalPath,
+							outDocx
+						);
+						continue;
+					}
+					if (it.kind === "pdf" && Array.isArray(it.pageImages)) {
+						for (const p of it.pageImages) {
+							await appendImageToDocWithMacro(
+								soffice,
+								p,
+								outDocx
+							);
+						}
+					}
+				}
+				console.log("[gen] appendix appended");
+			} else {
+				console.log("[gen] no appendix items");
+			}
+		} catch (e) {
+			console.log("[gen] appendix append failed", e && e.message);
+		}
+		// Now refresh TOC/indexes via server macro
+		console.log("[gen] refresh indexes via macro", soffice);
+		const { refreshedDocx } = await refreshIndexesWithMacro(
+			soffice,
+			outDocx,
+			uploadsDir
+		);
+		if (refreshedDocx && fs.existsSync(refreshedDocx)) {
+			const same = path.resolve(refreshedDocx) === path.resolve(outDocx);
+			if (!same) {
+				fs.copyFileSync(refreshedDocx, outDocx);
+			}
+			console.log("[gen] indexes refreshed");
+		}
+	} catch (e) {
+		console.log("[gen] macro sequence failed", e && e.message);
+	}
 
 	if (output === "pdf") {
+		console.log("[gen] converting to pdf");
 		const sofficePrimary = resolveSofficePath();
 		// Preflight: verify soffice is reachable (supports PATH)
 		try {
@@ -959,6 +1486,7 @@ async function generateFromTemplate(template, inputValues, output, res) {
 		let convertError = null;
 		try {
 			await convertDocxToPdf(sofficePrimary, outDocx, outDir);
+			console.log("[gen] pdf converted (primary)");
 		} catch (e1) {
 			convertError = e1;
 			// On Windows, retry with explicit soffice.com if available
@@ -977,6 +1505,7 @@ async function generateFromTemplate(template, inputValues, output, res) {
 					try {
 						await convertDocxToPdf(alt, outDocx, outDir);
 						convertError = null;
+						console.log("[gen] pdf converted (fallback)");
 					} catch (e2) {
 						convertError = e2;
 					}
@@ -994,6 +1523,7 @@ async function generateFromTemplate(template, inputValues, output, res) {
 			});
 		}
 		const outPdf = outDocx.replace(/\.docx$/, ".pdf");
+		console.log("[gen] streaming pdf", outPdf);
 		res.setHeader("Content-Type", "application/pdf");
 		res.setHeader("Content-Disposition", `attachment; filename=report.pdf`);
 		const pdfStream = fs.createReadStream(outPdf);
@@ -1019,6 +1549,7 @@ async function generateFromTemplate(template, inputValues, output, res) {
 		"application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 	);
 	res.setHeader("Content-Disposition", `attachment; filename=report.docx`);
+	console.log("[gen] streaming docx", outDocx);
 	const docxStream = fs.createReadStream(outDocx);
 	docxStream.pipe(res);
 	const cleanupDocx = () => {
@@ -1327,13 +1858,120 @@ app.post(
 	}
 );
 
+// Finalize import of an already tokenized DOCX using provided variables metadata
+app.post("/api/templates/finalize-import", async (req, res) => {
+	try {
+		const {
+			name,
+			description = "",
+			requiresKml = false,
+			variableGroups,
+			variables,
+			sourceDocxPath,
+		} = req.body || {};
+		if (!name) return res.status(400).json({ message: "name is required" });
+		if (!sourceDocxPath)
+			return res
+				.status(400)
+				.json({ message: "sourceDocxPath is required" });
+		if (!fs.existsSync(sourceDocxPath))
+			return res
+				.status(400)
+				.json({ message: "sourceDocxPath does not exist" });
+
+		let parsedVariables = Array.isArray(variables) ? variables : [];
+		let parsedGroups = Array.isArray(variableGroups) ? variableGroups : [];
+
+		// Verify tokenization for each variable by checking XML contains {{name}}
+		let xmlForVerify = "";
+		try {
+			const bin = fs.readFileSync(sourceDocxPath, "binary");
+			const zip = new PizZip(bin);
+			const docXml = zip.file("word/document.xml");
+			xmlForVerify = docXml ? docXml.asText() : "";
+		} catch (_) {
+			xmlForVerify = "";
+		}
+		const verifyTokenized = (xml, v) =>
+			v && v.name && typeof xml === "string"
+				? xml.includes(`{{${v.name}}}`)
+				: false;
+
+		// Enrich image variables with computed extents if not provided
+		try {
+			const bin = fs.readFileSync(sourceDocxPath, "binary");
+			const zip = new PizZip(bin);
+			parsedVariables = parsedVariables.map((v) => {
+				if (
+					v &&
+					v.type === "image" &&
+					v.imageTarget &&
+					!v.imageExtent
+				) {
+					const ext = findExtentForTargetInZip(zip, v.imageTarget);
+					if (ext) v.imageExtent = ext;
+				}
+				return v;
+			});
+		} catch (_) {}
+
+		const template = new Template({
+			name,
+			description: description || "Imported Word template",
+			requiresKml: !!requiresKml,
+			createdBy: "system",
+			sections: [],
+			sourceDocxPath,
+			variables: parsedVariables.map((v) => ({
+				...v,
+				tokenized: verifyTokenized(xmlForVerify, v),
+			})),
+			variableGroups: Array.isArray(parsedGroups) ? parsedGroups : [],
+		});
+
+		// Build and store an unfilled PDF preview
+		try {
+			const sofficePrimary = resolveSofficePath();
+			await convertDocxToPdf(
+				sofficePrimary,
+				sourceDocxPath,
+				templatePreviewsDir
+			);
+			const baseName = path.basename(
+				sourceDocxPath,
+				path.extname(sourceDocxPath)
+			);
+			const previewPdf = path.join(
+				templatePreviewsDir,
+				`${baseName}.pdf`
+			);
+			if (fs.existsSync(previewPdf)) {
+				template.previewPdfPath = `/uploads/template-previews/${path.basename(
+					previewPdf
+				)}`;
+			}
+		} catch (e) {
+			console.warn("Failed to build template preview PDF:", e.message);
+		}
+
+		const saved = await template.save();
+		return res.status(201).json(saved);
+	} catch (error) {
+		return res.status(400).json({ message: error.message });
+	}
+});
+
 // Generate filled DOCX and optionally PDF
 app.post("/api/templates/:id/generate", async (req, res) => {
 	try {
 		const { id } = req.params;
-		const { values, output = "docx" } = req.body; // values: { [name]: value }
+		const { values, output = "docx", kmlData } = req.body || {}; // values: { [name]: value }
 		const template = await Template.findById(id);
-		return generateFromTemplate(template, values, output, res);
+		const mergedInput = {
+			...(values || {}),
+			...(kmlData ? { kmlData } : {}),
+		};
+		return generateFromTemplate(template, mergedInput, output, res);
 	} catch (error) {
 		console.error(error);
 		res.status(500).json({ message: error.message });
@@ -1683,6 +2321,322 @@ app.get("/api/reports/:id", async (req, res) => {
 	}
 });
 
+// ----- Appendix: list items for a report
+app.get("/api/reports/:id/appendix", async (req, res) => {
+	try {
+		const payload = getAuthPayload(req);
+		if (!payload) return res.status(401).json({ message: "Unauthorized" });
+		const report = await Report.findById(req.params.id).lean();
+		if (!report)
+			return res.status(404).json({ message: "Report not found" });
+		if (String(report.createdBy) !== String(payload.sub || payload.email))
+			return res.status(403).json({ message: "Forbidden" });
+		const items = Array.isArray(report.appendixItems)
+			? report.appendixItems
+					.slice()
+					.sort((a, b) => Number(a.order || 0) - Number(b.order || 0))
+					.map((it) => ({
+						...it,
+						originalPath:
+							it && it.originalPath
+								? toAppendixUrl(it.originalPath)
+								: "",
+						thumbPath:
+							it && it.thumbPath
+								? toAppendixUrl(it.thumbPath)
+								: "",
+						pageImages: Array.isArray(it && it.pageImages)
+							? it.pageImages.map((p) => toAppendixUrl(p))
+							: [],
+					}))
+			: [];
+		return res.json(items);
+	} catch (error) {
+		return res.status(500).json({ message: error.message });
+	}
+});
+
+// ----- Appendix: upload items (images and PDFs)
+app.post(
+	"/api/reports/:id/appendix/upload",
+	uploadAppendix.array("files", 50),
+	async (req, res) => {
+		try {
+			const payload = getAuthPayload(req);
+			if (!payload)
+				return res.status(401).json({ message: "Unauthorized" });
+			const report = await Report.findById(req.params.id);
+			if (!report)
+				return res.status(404).json({ message: "Report not found" });
+			if (
+				String(report.createdBy) !==
+				String(payload.sub || payload.email)
+			)
+				return res.status(403).json({ message: "Forbidden" });
+			const files = Array.isArray(req.files) ? req.files : [];
+			if (!files.length)
+				return res.status(400).json({ message: "files[] required" });
+			const outItems = [];
+			for (const f of files) {
+				const originalName = f.originalname || path.basename(f.path);
+				const ext = String(
+					path.extname(originalName || "")
+				).toLowerCase();
+				const isPdf = ext === ".pdf";
+				const isImage = [".jpg", ".jpeg", ".png", ".webp"].includes(
+					ext
+				);
+				if (!isPdf && !isImage) {
+					// cleanup tmp
+					try {
+						fs.rmSync(f.path, { force: true });
+					} catch (_) {}
+					continue;
+				}
+				// Create item folder under /uploads/appendix/<reportId>/<itemId>
+				const newObjectId = new mongoose.Types.ObjectId();
+				const itemDir = path.join(
+					appendixBaseDir,
+					String(report._id),
+					String(newObjectId)
+				);
+				ensureDirSync(itemDir);
+				try {
+					console.log(
+						"[appendix][upload] report:",
+						String(report._id),
+						"item:",
+						String(newObjectId),
+						"dir:",
+						itemDir,
+						"kind:",
+						isPdf ? "pdf" : isImage ? "image" : "unknown"
+					);
+				} catch (_) {}
+				let itemDoc = {
+					_id: newObjectId,
+					kind: isPdf ? "pdf" : "image",
+					originalName,
+					originalPath: "",
+					thumbPath: "",
+					pageImages: [],
+					pageCount: 0,
+					order:
+						(Array.isArray(report.appendixItems)
+							? report.appendixItems.length
+							: 0) + outItems.length,
+					uploadedBy: payload.sub || payload.email,
+					createdAt: new Date(),
+				};
+
+				if (isImage) {
+					const dest = path.join(itemDir, `original${ext}`);
+					fs.renameSync(f.path, dest);
+					itemDoc.originalPath = dest;
+					// Build simple thumb (max 256)
+					try {
+						const th = path.join(itemDir, "thumb.jpg");
+						await sharp(dest)
+							.resize(256, 256, { fit: "inside" })
+							.jpeg({ quality: 80 })
+							.toFile(th);
+						itemDoc.thumbPath = th;
+					} catch (_) {}
+					try {
+						console.log("[appendix][upload] saved image:", dest);
+						if (itemDoc.thumbPath)
+							console.log(
+								"[appendix][upload] thumb:",
+								itemDoc.thumbPath
+							);
+					} catch (_) {}
+					outItems.push(itemDoc);
+				} else if (isPdf) {
+					const pdfPath = path.join(itemDir, `original${ext}`);
+					fs.renameSync(f.path, pdfPath);
+					itemDoc.originalPath = pdfPath;
+					const pagesDir = path.join(itemDir, "pages");
+					const baseName = "page";
+					const imgs = await runPdftoppmToPng(
+						pdfPath,
+						pagesDir,
+						baseName,
+						200
+					);
+					itemDoc.pageImages = imgs;
+					itemDoc.pageCount = imgs.length;
+					// thumb from first page
+					try {
+						const first = imgs[0];
+						if (first && fs.existsSync(first)) {
+							const th = path.join(itemDir, "thumb.jpg");
+							await sharp(first)
+								.resize(256, 256, { fit: "inside" })
+								.jpeg({ quality: 80 })
+								.toFile(th);
+							itemDoc.thumbPath = th;
+						}
+					} catch (_) {}
+					try {
+						console.log("[appendix][upload] saved pdf:", pdfPath);
+						console.log(
+							"[appendix][upload] pages:",
+							imgs.length,
+							pagesDir
+						);
+						if (itemDoc.thumbPath)
+							console.log(
+								"[appendix][upload] thumb:",
+								itemDoc.thumbPath
+							);
+					} catch (_) {}
+					outItems.push(itemDoc);
+				}
+			}
+			report.appendixItems = Array.isArray(report.appendixItems)
+				? report.appendixItems
+				: [];
+			report.appendixItems.push(...outItems);
+			await report.save();
+			return res.status(201).json(outItems);
+		} catch (error) {
+			return res.status(400).json({ message: error.message });
+		}
+	}
+);
+
+// ----- Appendix: reorder items
+app.patch("/api/reports/:id/appendix/order", async (req, res) => {
+	try {
+		const payload = getAuthPayload(req);
+		if (!payload) return res.status(401).json({ message: "Unauthorized" });
+		const report = await Report.findById(req.params.id);
+		if (!report)
+			return res.status(404).json({ message: "Report not found" });
+		if (String(report.createdBy) !== String(payload.sub || payload.email))
+			return res.status(403).json({ message: "Forbidden" });
+		const updates = Array.isArray(req.body)
+			? req.body
+			: req.body && Array.isArray(req.body.items)
+			? req.body.items
+			: [];
+		if (!updates.length) return res.json({ message: "No changes" });
+		const byId = new Map(
+			(report.appendixItems || []).map((it) => [String(it._id), it])
+		);
+		for (const u of updates) {
+			const it = byId.get(String(u.itemId));
+			if (it) it.order = Number(u.order || 0);
+		}
+		report.appendixItems.sort(
+			(a, b) => Number(a.order || 0) - Number(b.order || 0)
+		);
+		await report.save();
+		return res.json({ ok: true });
+	} catch (error) {
+		return res.status(400).json({ message: error.message });
+	}
+});
+
+// ----- Appendix: delete item
+app.delete("/api/reports/:id/appendix/:itemId", async (req, res) => {
+	try {
+		const payload = getAuthPayload(req);
+		if (!payload) return res.status(401).json({ message: "Unauthorized" });
+		const report = await Report.findById(req.params.id);
+		if (!report)
+			return res.status(404).json({ message: "Report not found" });
+		if (String(report.createdBy) !== String(payload.sub || payload.email))
+			return res.status(403).json({ message: "Forbidden" });
+		const itemId = String(req.params.itemId);
+		const items = Array.isArray(report.appendixItems)
+			? report.appendixItems
+			: [];
+		const idx = items.findIndex((x) => String(x._id) === itemId);
+		if (idx === -1)
+			return res.status(404).json({ message: "Item not found" });
+		const [removed] = items.splice(idx, 1);
+		report.appendixItems = items;
+		await report.save();
+		// Delete files on disk (derive directory from stored file paths for robustness)
+		try {
+			const reportRoot = path.resolve(
+				path.join(appendixBaseDir, String(report._id))
+			);
+			try {
+				console.log(
+					"[appendix][delete] report:",
+					String(report._id),
+					"item:",
+					String((removed && removed._id) || "")
+				);
+			} catch (_) {}
+			const candidates = [];
+			if (removed && removed.originalPath)
+				candidates.push(path.dirname(removed.originalPath));
+			if (removed && removed.thumbPath)
+				candidates.push(path.dirname(removed.thumbPath));
+			// also try folder by _id (new schema)
+			if (removed && removed._id)
+				candidates.push(path.join(reportRoot, String(removed._id)));
+			const tried = new Set();
+			for (const c of candidates) {
+				if (!c) continue;
+				const target = path.resolve(c);
+				if (tried.has(target)) continue;
+				tried.add(target);
+				if (!target.startsWith(reportRoot)) continue; // safety guard
+				try {
+					forceRemoveSync(target);
+				} catch (e) {
+					try {
+						console.log(
+							"[appendix][delete] rm failed:",
+							target,
+							e && e.message
+						);
+					} catch (_) {}
+				}
+			}
+			// Extra: delete individual files if any remain (legacy layouts)
+			try {
+				if (
+					removed &&
+					removed.originalPath &&
+					fs.existsSync(removed.originalPath)
+				)
+					fs.unlinkSync(removed.originalPath);
+			} catch (_) {}
+			try {
+				if (
+					removed &&
+					removed.thumbPath &&
+					fs.existsSync(removed.thumbPath)
+				)
+					fs.unlinkSync(removed.thumbPath);
+			} catch (_) {}
+			try {
+				if (removed && Array.isArray(removed.pageImages)) {
+					for (const p of removed.pageImages) {
+						try {
+							if (p && fs.existsSync(p)) fs.unlinkSync(p);
+						} catch (_) {}
+					}
+				}
+			} catch (_) {}
+			// If no appendix items remain, remove the report's appendix directory
+			if (!report.appendixItems || report.appendixItems.length === 0) {
+				try {
+					fs.rmSync(reportRoot, { recursive: true, force: true });
+				} catch (_) {}
+			}
+		} catch (_) {}
+		return res.json({ ok: true });
+	} catch (error) {
+		return res.status(400).json({ message: error.message });
+	}
+});
+
 app.put("/api/reports/:id", async (req, res) => {
 	try {
 		const payload = getAuthPayload(req);
@@ -1839,9 +2793,35 @@ app.post("/api/reports/:id/generate", async (req, res) => {
 			}
 			return originalEnd(...args);
 		};
-		return generateFromTemplate(template, report.values, output, res);
+		return generateFromTemplate(template, report.values, output, res, {
+			appendixItems: Array.isArray(report.appendixItems)
+				? report.appendixItems
+				: [],
+		});
 	} catch (error) {
 		res.status(500).json({ message: error.message });
+	}
+});
+
+// Preview from Report (appendix included, no status gate)
+app.post("/api/reports/:id/preview-pdf", async (req, res) => {
+	try {
+		const { id } = req.params;
+		const payload = getAuthPayload(req);
+		if (!payload) return res.status(401).json({ message: "Unauthorized" });
+		const report = await Report.findById(id).lean();
+		if (!report)
+			return res.status(404).json({ message: "Report not found" });
+		if (String(report.createdBy) !== String(payload.sub || payload.email))
+			return res.status(403).json({ message: "Forbidden" });
+		const template = await Template.findById(report.templateId);
+		return generateFromTemplate(template, report.values, "pdf", res, {
+			appendixItems: Array.isArray(report.appendixItems)
+				? report.appendixItems
+				: [],
+		});
+	} catch (error) {
+		return res.status(500).json({ message: error.message });
 	}
 });
 
@@ -1862,7 +2842,33 @@ app.delete("/api/reports/:id", async (req, res) => {
 				.json({ message: "Submitted reports cannot be deleted" });
 		}
 		const imageUrls = collectLocalImageUrls(report.values || {});
+		// Remove appendix directory for this report first (regardless of items)
+		try {
+			const reportAppendixDir = path.resolve(
+				path.join(appendixBaseDir, String(report._id))
+			);
+			const appendixBase = path.resolve(appendixBaseDir);
+			if (
+				reportAppendixDir.startsWith(appendixBase) &&
+				fs.existsSync(reportAppendixDir)
+			) {
+				forceRemoveSync(reportAppendixDir);
+			}
+		} catch (_) {}
 		await Report.findByIdAndDelete(req.params.id);
+		// Remove appendix directory for this report (again, post-delete)
+		try {
+			const reportAppendixDir = path.resolve(
+				path.join(appendixBaseDir, String(report._id))
+			);
+			const appendixBase = path.resolve(appendixBaseDir);
+			if (
+				reportAppendixDir.startsWith(appendixBase) &&
+				fs.existsSync(reportAppendixDir)
+			) {
+				forceRemoveSync(reportAppendixDir);
+			}
+		} catch (_) {}
 		// Attempt to delete any images no longer referenced by any report
 		try {
 			for (const url of imageUrls) {
@@ -1967,13 +2973,33 @@ app.post("/api/templates/:id/preview-html", async (req, res) => {
 
 		const finalValues = { ...(values || {}) };
 		for (const v of template.variables || []) {
-			if (
-				v.type === "kml" &&
-				v.kmlField &&
-				finalValues[v.kmlField] &&
-				!finalValues[v.name]
-			) {
-				finalValues[v.name] = finalValues[v.kmlField];
+			if (v.type === "kml" && v.kmlField) {
+				let srcVal = undefined;
+				try {
+					if (
+						values &&
+						typeof values === "object" &&
+						values.kmlData &&
+						Object.prototype.hasOwnProperty.call(
+							values.kmlData,
+							v.kmlField
+						)
+					) {
+						srcVal = values.kmlData[v.kmlField];
+					}
+				} catch (_) {}
+				if (srcVal === undefined || srcVal === null) {
+					srcVal =
+						finalValues[v.kmlField] !== undefined &&
+						finalValues[v.kmlField] !== null
+							? finalValues[v.kmlField]
+							: finalValues[v.name];
+				}
+				if (srcVal !== undefined && srcVal !== null) {
+					const str = String(srcVal);
+					finalValues[v.kmlField] = str;
+					finalValues[v.name] = str;
+				}
 			}
 			if (v.type === "calculated" && v.expression) {
 				try {
@@ -2076,4 +3102,88 @@ app.patch("/api/templates/:id/reactivate", async (req, res) => {
 // Start server
 app.listen(PORT, () => {
 	console.log(`Server is running on port ${PORT}`);
+});
+
+// ----- Changelog APIs -----
+// List changelog entries (newest first)
+app.get("/api/changelog", async (req, res) => {
+	try {
+		const items = await ChangeLog.find({})
+			.sort({ date: -1, createdAt: -1 })
+			.lean();
+		return res.json(items);
+	} catch (error) {
+		return res.status(500).json({ message: error.message });
+	}
+});
+
+// Create changelog entry (admin only)
+app.post("/api/changelog", async (req, res) => {
+	try {
+		const payload = getAuthPayload(req);
+		if (!payload) return res.status(401).json({ message: "Unauthorized" });
+		if (payload.role !== "Admin")
+			return res
+				.status(403)
+				.json({ message: "Admin privileges required" });
+		const { title, description, date } = req.body || {};
+		if (!title || !description || !date)
+			return res
+				.status(400)
+				.json({ message: "title, description, date are required" });
+		const item = new ChangeLog({
+			title,
+			description,
+			date: new Date(date),
+			createdBy: String(payload.sub || payload.email),
+		});
+		const saved = await item.save();
+		return res.status(201).json(saved);
+	} catch (error) {
+		return res.status(400).json({ message: error.message });
+	}
+});
+
+// Update changelog entry (admin only)
+app.put("/api/changelog/:id", async (req, res) => {
+	try {
+		const payload = getAuthPayload(req);
+		if (!payload) return res.status(401).json({ message: "Unauthorized" });
+		if (payload.role !== "Admin")
+			return res
+				.status(403)
+				.json({ message: "Admin privileges required" });
+		const { id } = req.params;
+		const { title, description, date, disabled } = req.body || {};
+		const updates = {};
+		if (typeof title === "string") updates.title = title;
+		if (typeof description === "string") updates.description = description;
+		if (date) updates.date = new Date(date);
+		if (typeof disabled === "boolean") updates.disabled = disabled;
+		const saved = await ChangeLog.findByIdAndUpdate(id, updates, {
+			new: true,
+		});
+		if (!saved) return res.status(404).json({ message: "Not found" });
+		return res.json(saved);
+	} catch (error) {
+		return res.status(400).json({ message: error.message });
+	}
+});
+
+// Delete changelog entry (admin only)
+app.delete("/api/changelog/:id", async (req, res) => {
+	try {
+		const payload = getAuthPayload(req);
+		if (!payload) return res.status(401).json({ message: "Unauthorized" });
+		if (payload.role !== "Admin")
+			return res
+				.status(403)
+				.json({ message: "Admin privileges required" });
+		const { id } = req.params;
+		const existed = await ChangeLog.findByIdAndDelete(id);
+		if (!existed) return res.status(404).json({ message: "Not found" });
+		return res.json({ ok: true });
+	} catch (error) {
+		return res.status(400).json({ message: error.message });
+	}
 });

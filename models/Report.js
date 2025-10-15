@@ -2,6 +2,33 @@ const mongoose = require("mongoose");
 
 const reportSchema = new mongoose.Schema(
 	{
+		// Appendix items to be appended to the generated report (images and PDFs converted to images)
+		appendixItems: {
+			type: [
+				new mongoose.Schema(
+					{
+						kind: {
+							type: String,
+							enum: ["image", "pdf"],
+							required: true,
+						},
+						originalName: { type: String },
+						originalPath: { type: String }, // absolute or repo-relative path to uploaded image/PDF
+						thumbPath: { type: String }, // optional thumbnail path (first page for PDFs)
+						pageImages: { type: [String], default: [] }, // per-page image paths for PDFs; empty for single images
+						pageCount: { type: Number, default: 0 },
+						order: { type: Number, default: 0 },
+						uploadedBy: {
+							type: mongoose.Schema.Types.ObjectId,
+							ref: "User",
+						},
+						createdAt: { type: Date, default: Date.now },
+					},
+					{ _id: true }
+				),
+			],
+			default: [],
+		},
 		templateId: {
 			type: mongoose.Schema.Types.ObjectId,
 			ref: "Template",
