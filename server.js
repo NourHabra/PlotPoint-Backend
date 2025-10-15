@@ -134,6 +134,11 @@ function pathToFileUrl(p) {
 	return `file:///${norm}`;
 }
 
+// Build encoded file URL (safe for spaces and most characters)
+function pathToEncodedFileUrl(p) {
+	return encodeURI(pathToFileUrl(p));
+}
+
 // Generic conversion helper using a temporary LO user profile
 async function convertWithSoffice(sofficePath, filter, inputPath, outputDir) {
 	const profileDir = path.join(outputDir, `lo-profile-${Date.now()}`);
@@ -253,11 +258,20 @@ const uploadsDir = path.join(__dirname, "uploads");
 if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir);
 const templatePreviewsDir = path.join(uploadsDir, "template-previews");
 const imagesDir = path.join(uploadsDir, "images");
+// Appendix storage base
+const appendixBaseDir = path.join(uploadsDir, "appendix");
+const appendixTmpDir = path.join(appendixBaseDir, "tmp");
 try {
 	fs.mkdirSync(templatePreviewsDir, { recursive: true });
 } catch (_) {}
 try {
 	fs.mkdirSync(imagesDir, { recursive: true });
+} catch (_) {}
+try {
+	fs.mkdirSync(appendixBaseDir, { recursive: true });
+} catch (_) {}
+try {
+	fs.mkdirSync(appendixTmpDir, { recursive: true });
 } catch (_) {}
 
 const storage = multer.diskStorage({
@@ -299,12 +313,139 @@ const avatarStorage = multer.diskStorage({
 });
 const uploadAvatar = multer({ storage: avatarStorage });
 
+// Storage for appendix uploads (temporary, moved per-item after processing)
+const appendixStorage = multer.diskStorage({
+	destination: function (req, file, cb) {
+		cb(null, appendixTmpDir);
+	},
+	filename: function (req, file, cb) {
+		const unique = Date.now() + "-" + Math.round(Math.random() * 1e9);
+		cb(null, unique + path.extname(file.originalname));
+	},
+});
+const uploadAppendix = multer({ storage: appendixStorage });
+
+function ensureDirSync(dir) {
+	try {
+		fs.mkdirSync(dir, { recursive: true });
+	} catch (_) {}
+}
+
+function toAppendixUrl(fullPath) {
+	try {
+		const rel = path
+			.relative(appendixBaseDir, fullPath)
+			.replace(/\\/g, "/");
+		return `/uploads/appendix/${rel}`;
+	} catch (_) {
+		return "";
+	}
+}
+
+async function runPdftoppmToPng(inputPdfPath, pagesDir, baseName, dpi) {
+	return new Promise((resolve, reject) => {
+		ensureDirSync(pagesDir);
+		const args = [
+			"-png",
+			"-r",
+			String(dpi || 200),
+			inputPdfPath,
+			path.join(pagesDir, baseName),
+		];
+		execFile(
+			"pdftoppm",
+			args,
+			{ windowsHide: true },
+			(err, stdout, stderr) => {
+				if (err) {
+					const detail =
+						(stderr && String(stderr)) ||
+						(stdout && String(stdout)) ||
+						err.message;
+					return reject(new Error(detail));
+				}
+				try {
+					const files = fs
+						.readdirSync(pagesDir)
+						.filter(
+							(f) =>
+								f.startsWith(`${baseName}-`) &&
+								f.toLowerCase().endsWith(".png")
+						)
+						.sort((a, b) => {
+							const na =
+								parseInt(
+									a.replace(/^.*-(\d+)\.png$/i, "$1"),
+									10
+								) || 0;
+							const nb =
+								parseInt(
+									b.replace(/^.*-(\d+)\.png$/i, "$1"),
+									10
+								) || 0;
+							return na - nb;
+						});
+					const abs = files.map((f) => path.join(pagesDir, f));
+					resolve(abs);
+				} catch (e) {
+					reject(e);
+				}
+			}
+		);
+	});
+}
+
+async function appendImageToDocWithMacro(
+	sofficePath,
+	imagePath,
+	targetDocxPath
+) {
+	const imgUrl = pathToEncodedFileUrl(imagePath);
+	const docUrl = pathToEncodedFileUrl(targetDocxPath);
+	// Note: do NOT wrap macro arg in quotes; execFile does not use a shell
+	const macroArg = `macro:///Standard.Insert.InsertPhotoSaveAndClose_FitToPage(${imgUrl},${docUrl})`;
+	const args = [
+		"--headless",
+		"--invisible",
+		"--nologo",
+		"--norestore",
+		macroArg,
+	];
+	try {
+		console.log(`[appendix][cmd] ${sofficePath} ${args.join(" ")}`);
+	} catch (_) {}
+	await new Promise((resolve, reject) => {
+		execFile(
+			sofficePath,
+			args,
+			{ windowsHide: true },
+			(err, stdout, stderr) => {
+				if (err) {
+					const detail =
+						(stderr && String(stderr)) ||
+						(stdout && String(stdout)) ||
+						err.message;
+					return reject(new Error(detail));
+				}
+				try {
+					console.log(
+						`[appendix][ok] ${sofficePath} ${args.join(" ")}`
+					);
+				} catch (_) {}
+				resolve();
+			}
+		);
+	});
+}
+
 // Serve avatars as static assets
 app.use("/uploads/avatars", express.static(avatarsDir));
 // Serve template preview PDFs
 app.use("/uploads/template-previews", express.static(templatePreviewsDir));
 // Serve uploaded images for variables
 app.use("/uploads/images", express.static(imagesDir));
+// Serve appendix assets
+app.use("/uploads/appendix", express.static(appendixBaseDir));
 // Helper: resolve an image buffer from provided value (data URL, absolute URL, or local uploads path)
 async function resolveImageBuffer(provided) {
 	try {
@@ -1023,7 +1164,13 @@ app.patch("/api/user-templates/:id", async (req, res) => {
 });
 
 // Shared generator used by template and report routes
-async function generateFromTemplate(template, inputValues, output, res) {
+async function generateFromTemplate(
+	template,
+	inputValues,
+	output,
+	res,
+	options
+) {
 	if (!template)
 		return res.status(404).json({ message: "Template not found" });
 	if (!template.sourceDocxPath)
@@ -1198,24 +1345,62 @@ async function generateFromTemplate(template, inputValues, output, res) {
 	// Last step: refresh TOC/indexes via server macro (directly on DOCX)
 	try {
 		const soffice = resolveSofficePath();
+		// Append appendix items first (in desired order)
+		try {
+			const items =
+				options && Array.isArray(options.appendixItems)
+					? options.appendixItems
+					: [];
+			if (items.length > 0) {
+				console.log("[gen] appending appendix items:", items.length);
+				const sorted = items
+					.slice()
+					.sort(
+						(a, b) => Number(a.order || 0) - Number(b.order || 0)
+					);
+				for (const it of sorted) {
+					if (!it || !it.kind) continue;
+					if (it.kind === "image" && it.originalPath) {
+						await appendImageToDocWithMacro(
+							soffice,
+							it.originalPath,
+							outDocx
+						);
+						continue;
+					}
+					if (it.kind === "pdf" && Array.isArray(it.pageImages)) {
+						for (const p of it.pageImages) {
+							await appendImageToDocWithMacro(
+								soffice,
+								p,
+								outDocx
+							);
+						}
+					}
+				}
+				console.log("[gen] appendix appended");
+			} else {
+				console.log("[gen] no appendix items");
+			}
+		} catch (e) {
+			console.log("[gen] appendix append failed", e && e.message);
+		}
+		// Now refresh TOC/indexes via server macro
 		console.log("[gen] refresh indexes via macro", soffice);
 		const { refreshedDocx } = await refreshIndexesWithMacro(
 			soffice,
 			outDocx,
 			uploadsDir
 		);
-		// Replace outDocx with refreshed version for subsequent export/stream
 		if (refreshedDocx && fs.existsSync(refreshedDocx)) {
 			const same = path.resolve(refreshedDocx) === path.resolve(outDocx);
 			if (!same) {
-				// Overwrite without deleting first to avoid race with macro
 				fs.copyFileSync(refreshedDocx, outDocx);
 			}
 			console.log("[gen] indexes refreshed");
 		}
 	} catch (e) {
-		// Non-fatal: continue without refreshed indexes
-		console.log("[gen] macro refresh failed", e && e.message);
+		console.log("[gen] macro sequence failed", e && e.message);
 	}
 
 	if (output === "pdf") {
@@ -2078,6 +2263,237 @@ app.get("/api/reports/:id", async (req, res) => {
 	}
 });
 
+// ----- Appendix: list items for a report
+app.get("/api/reports/:id/appendix", async (req, res) => {
+	try {
+		const payload = getAuthPayload(req);
+		if (!payload) return res.status(401).json({ message: "Unauthorized" });
+		const report = await Report.findById(req.params.id).lean();
+		if (!report)
+			return res.status(404).json({ message: "Report not found" });
+		if (String(report.createdBy) !== String(payload.sub || payload.email))
+			return res.status(403).json({ message: "Forbidden" });
+		const items = Array.isArray(report.appendixItems)
+			? report.appendixItems
+					.slice()
+					.sort((a, b) => Number(a.order || 0) - Number(b.order || 0))
+					.map((it) => ({
+						...it,
+						originalPath:
+							it && it.originalPath
+								? toAppendixUrl(it.originalPath)
+								: "",
+						thumbPath:
+							it && it.thumbPath
+								? toAppendixUrl(it.thumbPath)
+								: "",
+						pageImages: Array.isArray(it && it.pageImages)
+							? it.pageImages.map((p) => toAppendixUrl(p))
+							: [],
+					}))
+			: [];
+		return res.json(items);
+	} catch (error) {
+		return res.status(500).json({ message: error.message });
+	}
+});
+
+// ----- Appendix: upload items (images and PDFs)
+app.post(
+	"/api/reports/:id/appendix/upload",
+	uploadAppendix.array("files", 50),
+	async (req, res) => {
+		try {
+			const payload = getAuthPayload(req);
+			if (!payload)
+				return res.status(401).json({ message: "Unauthorized" });
+			const report = await Report.findById(req.params.id);
+			if (!report)
+				return res.status(404).json({ message: "Report not found" });
+			if (
+				String(report.createdBy) !==
+				String(payload.sub || payload.email)
+			)
+				return res.status(403).json({ message: "Forbidden" });
+			const files = Array.isArray(req.files) ? req.files : [];
+			if (!files.length)
+				return res.status(400).json({ message: "files[] required" });
+			const outItems = [];
+			for (const f of files) {
+				const originalName = f.originalname || path.basename(f.path);
+				const ext = String(
+					path.extname(originalName || "")
+				).toLowerCase();
+				const isPdf = ext === ".pdf";
+				const isImage = [".jpg", ".jpeg", ".png", ".webp"].includes(
+					ext
+				);
+				if (!isPdf && !isImage) {
+					// cleanup tmp
+					try {
+						fs.rmSync(f.path, { force: true });
+					} catch (_) {}
+					continue;
+				}
+				// Create item folder under /uploads/appendix/<reportId>/<itemId>
+				const itemId = `${Date.now()}-${Math.random()
+					.toString(36)
+					.slice(2, 8)}`;
+				const itemDir = path.join(
+					appendixBaseDir,
+					String(report._id),
+					itemId
+				);
+				ensureDirSync(itemDir);
+				let itemDoc = {
+					_id: new mongoose.Types.ObjectId(),
+					kind: isPdf ? "pdf" : "image",
+					originalName,
+					originalPath: "",
+					thumbPath: "",
+					pageImages: [],
+					pageCount: 0,
+					order:
+						(Array.isArray(report.appendixItems)
+							? report.appendixItems.length
+							: 0) + outItems.length,
+					uploadedBy: payload.sub || payload.email,
+					createdAt: new Date(),
+				};
+
+				if (isImage) {
+					const dest = path.join(itemDir, `original${ext}`);
+					fs.renameSync(f.path, dest);
+					itemDoc.originalPath = dest;
+					// Build simple thumb (max 256)
+					try {
+						const th = path.join(itemDir, "thumb.jpg");
+						await sharp(dest)
+							.resize(256, 256, { fit: "inside" })
+							.jpeg({ quality: 80 })
+							.toFile(th);
+						itemDoc.thumbPath = th;
+					} catch (_) {}
+					outItems.push(itemDoc);
+				} else if (isPdf) {
+					const pdfPath = path.join(itemDir, `original${ext}`);
+					fs.renameSync(f.path, pdfPath);
+					itemDoc.originalPath = pdfPath;
+					const pagesDir = path.join(itemDir, "pages");
+					const baseName = "page";
+					const imgs = await runPdftoppmToPng(
+						pdfPath,
+						pagesDir,
+						baseName,
+						200
+					);
+					itemDoc.pageImages = imgs;
+					itemDoc.pageCount = imgs.length;
+					// thumb from first page
+					try {
+						const first = imgs[0];
+						if (first && fs.existsSync(first)) {
+							const th = path.join(itemDir, "thumb.jpg");
+							await sharp(first)
+								.resize(256, 256, { fit: "inside" })
+								.jpeg({ quality: 80 })
+								.toFile(th);
+							itemDoc.thumbPath = th;
+						}
+					} catch (_) {}
+					outItems.push(itemDoc);
+				}
+			}
+			report.appendixItems = Array.isArray(report.appendixItems)
+				? report.appendixItems
+				: [];
+			report.appendixItems.push(...outItems);
+			await report.save();
+			return res.status(201).json(outItems);
+		} catch (error) {
+			return res.status(400).json({ message: error.message });
+		}
+	}
+);
+
+// ----- Appendix: reorder items
+app.patch("/api/reports/:id/appendix/order", async (req, res) => {
+	try {
+		const payload = getAuthPayload(req);
+		if (!payload) return res.status(401).json({ message: "Unauthorized" });
+		const report = await Report.findById(req.params.id);
+		if (!report)
+			return res.status(404).json({ message: "Report not found" });
+		if (String(report.createdBy) !== String(payload.sub || payload.email))
+			return res.status(403).json({ message: "Forbidden" });
+		const updates = Array.isArray(req.body)
+			? req.body
+			: req.body && Array.isArray(req.body.items)
+			? req.body.items
+			: [];
+		if (!updates.length) return res.json({ message: "No changes" });
+		const byId = new Map(
+			(report.appendixItems || []).map((it) => [String(it._id), it])
+		);
+		for (const u of updates) {
+			const it = byId.get(String(u.itemId));
+			if (it) it.order = Number(u.order || 0);
+		}
+		report.appendixItems.sort(
+			(a, b) => Number(a.order || 0) - Number(b.order || 0)
+		);
+		await report.save();
+		return res.json({ ok: true });
+	} catch (error) {
+		return res.status(400).json({ message: error.message });
+	}
+});
+
+// ----- Appendix: delete item
+app.delete("/api/reports/:id/appendix/:itemId", async (req, res) => {
+	try {
+		const payload = getAuthPayload(req);
+		if (!payload) return res.status(401).json({ message: "Unauthorized" });
+		const report = await Report.findById(req.params.id);
+		if (!report)
+			return res.status(404).json({ message: "Report not found" });
+		if (String(report.createdBy) !== String(payload.sub || payload.email))
+			return res.status(403).json({ message: "Forbidden" });
+		const itemId = String(req.params.itemId);
+		const items = Array.isArray(report.appendixItems)
+			? report.appendixItems
+			: [];
+		const idx = items.findIndex((x) => String(x._id) === itemId);
+		if (idx === -1)
+			return res.status(404).json({ message: "Item not found" });
+		const [removed] = items.splice(idx, 1);
+		report.appendixItems = items;
+		await report.save();
+		// Delete files on disk
+		try {
+			const itemDir = path.join(
+				appendixBaseDir,
+				String(report._id),
+				removed._id ? String(removed._id) : ""
+			);
+			fs.rmSync(itemDir, { recursive: true, force: true });
+			// If no appendix items remain, remove the report's appendix directory
+			if (!report.appendixItems || report.appendixItems.length === 0) {
+				const reportDir = path.join(
+					appendixBaseDir,
+					String(report._id)
+				);
+				try {
+					fs.rmSync(reportDir, { recursive: true, force: true });
+				} catch (_) {}
+			}
+		} catch (_) {}
+		return res.json({ ok: true });
+	} catch (error) {
+		return res.status(400).json({ message: error.message });
+	}
+});
+
 app.put("/api/reports/:id", async (req, res) => {
 	try {
 		const payload = getAuthPayload(req);
@@ -2234,9 +2650,35 @@ app.post("/api/reports/:id/generate", async (req, res) => {
 			}
 			return originalEnd(...args);
 		};
-		return generateFromTemplate(template, report.values, output, res);
+		return generateFromTemplate(template, report.values, output, res, {
+			appendixItems: Array.isArray(report.appendixItems)
+				? report.appendixItems
+				: [],
+		});
 	} catch (error) {
 		res.status(500).json({ message: error.message });
+	}
+});
+
+// Preview from Report (appendix included, no status gate)
+app.post("/api/reports/:id/preview-pdf", async (req, res) => {
+	try {
+		const { id } = req.params;
+		const payload = getAuthPayload(req);
+		if (!payload) return res.status(401).json({ message: "Unauthorized" });
+		const report = await Report.findById(id).lean();
+		if (!report)
+			return res.status(404).json({ message: "Report not found" });
+		if (String(report.createdBy) !== String(payload.sub || payload.email))
+			return res.status(403).json({ message: "Forbidden" });
+		const template = await Template.findById(report.templateId);
+		return generateFromTemplate(template, report.values, "pdf", res, {
+			appendixItems: Array.isArray(report.appendixItems)
+				? report.appendixItems
+				: [],
+		});
+	} catch (error) {
+		return res.status(500).json({ message: error.message });
 	}
 });
 
@@ -2258,6 +2700,14 @@ app.delete("/api/reports/:id", async (req, res) => {
 		}
 		const imageUrls = collectLocalImageUrls(report.values || {});
 		await Report.findByIdAndDelete(req.params.id);
+		// Remove appendix directory for this report
+		try {
+			const reportAppendixDir = path.join(
+				appendixBaseDir,
+				String(report._id)
+			);
+			fs.rmSync(reportAppendixDir, { recursive: true, force: true });
+		} catch (_) {}
 		// Attempt to delete any images no longer referenced by any report
 		try {
 			for (const url of imageUrls) {
