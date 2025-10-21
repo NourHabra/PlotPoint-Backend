@@ -26,6 +26,8 @@ const contentBlockSchema = new mongoose.Schema({
 		type: String,
 		enum: [
 			"municipality",
+			"region",
+			"part",
 			"plot_number",
 			"plot_area",
 			"coordinates",
