@@ -29,6 +29,8 @@ const contentBlockSchema = new mongoose.Schema({
 			"plot_number",
 			"plot_area",
 			"coordinates",
+			"sheet",
+			"plan",
 			"sheet_plan",
 			"registration_number",
 			"property_type",
