@@ -197,6 +197,33 @@ function pathToEncodedFileUrl(p) {
 	return encodeURI(pathToFileUrl(p));
 }
 
+// Format a date string into "Mon DD, YYYY"; falls back to input if invalid
+function formatDateForReport(input) {
+	try {
+		if (!input) return input;
+		// Handle typical browser date input (YYYY-MM-DD) without TZ shifts
+		if (typeof input === "string" && /^\d{4}-\d{2}-\d{2}$/.test(input)) {
+			const [y, m, d] = input.split("-").map((x) => parseInt(x, 10));
+			const dt = new Date(Date.UTC(y, m - 1, d));
+			return dt.toLocaleDateString("en-US", {
+				month: "short",
+				day: "2-digit",
+				year: "numeric",
+				timeZone: "UTC",
+			});
+		}
+		const dt = new Date(input);
+		if (isNaN(dt.getTime())) return input;
+		return dt.toLocaleDateString("en-US", {
+			month: "short",
+			day: "2-digit",
+			year: "numeric",
+		});
+	} catch (_) {
+		return input;
+	}
+}
+
 // Generic conversion helper using a temporary LO user profile
 async function convertWithSoffice(sofficePath, filter, inputPath, outputDir) {
 	const profileDir = path.join(outputDir, `lo-profile-${Date.now()}`);
@@ -1488,6 +1515,17 @@ async function generateFromTemplate(
 				finalValues[v.name] = String(fn(...Object.values(finalValues)));
 			} catch (e) {
 				finalValues[v.name] = "";
+			}
+		}
+		// Normalize date variables to "Mon DD, YYYY"
+		if (v.type === "date") {
+			const raw = finalValues[v.name];
+			if (
+				raw !== undefined &&
+				raw !== null &&
+				String(raw).trim() !== ""
+			) {
+				finalValues[v.name] = String(formatDateForReport(raw));
 			}
 		}
 	}
@@ -3200,6 +3238,20 @@ app.post("/api/templates/:id/preview-html", async (req, res) => {
 					);
 				} catch (_) {
 					finalValues[v.name] = "";
+				}
+			}
+		}
+
+		// Normalize date variables to "Mon DD, YYYY"
+		for (const v of template.variables || []) {
+			if (v.type === "date") {
+				const raw = finalValues[v.name];
+				if (
+					raw !== undefined &&
+					raw !== null &&
+					String(raw).trim() !== ""
+				) {
+					finalValues[v.name] = String(formatDateForReport(raw));
 				}
 			}
 		}
