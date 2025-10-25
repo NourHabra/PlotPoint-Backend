@@ -496,6 +496,136 @@ async function appendImageToDocWithMacro(
 	});
 }
 
+// Insert an image by replacing a specific text token using LibreOffice macro
+async function replaceTextWithImageUsingMacro(
+	sofficePath,
+	imagePath,
+	targetDocxPath,
+	sourceText
+) {
+	const imgUrl = pathToEncodedFileUrl(imagePath);
+	const docUrl = pathToEncodedFileUrl(targetDocxPath);
+	// Pass the raw source text; do not quote (execFile avoids shell parsing)
+	const macroArg = `macro:///Standard.Insert.InsertPhotoReplaceText_FitToPage(${imgUrl},${docUrl},${sourceText})`;
+	const args = [
+		"--headless",
+		"--invisible",
+		"--nologo",
+		"--norestore",
+		macroArg,
+	];
+	try {
+		console.log(`[inline-img][cmd] ${sofficePath} ${args.join(" ")}`);
+	} catch (_) {}
+	await new Promise((resolve, reject) => {
+		execFile(
+			sofficePath,
+			args,
+			{ windowsHide: true },
+			(err, stdout, stderr) => {
+				if (err) {
+					const detail =
+						(stderr && String(stderr)) ||
+						(stdout && String(stdout)) ||
+						err.message;
+					return reject(new Error(detail));
+				}
+				try {
+					console.log(
+						`[inline-img][ok] ${sofficePath} ${args.join(" ")}`
+					);
+				} catch (_) {}
+				resolve();
+			}
+		);
+	});
+}
+
+// Check if a DOCX still contains the given source text (robust across split <w:t> runs)
+async function docxContainsSourceText(docxPath, sourceText) {
+	try {
+		if (!docxPath || !fs.existsSync(docxPath) || !sourceText) return false;
+		const bin = fs.readFileSync(docxPath, "binary");
+		const zip = new PizZip(bin);
+		const xmlPaths = Object.keys(zip.files || {}).filter(
+			(k) =>
+				k.startsWith("word/") &&
+				k.endsWith(".xml") &&
+				!k.includes("/_rels/")
+		);
+		const nbspToSpace = (s) => String(s || "").replace(/\u00A0/g, " ");
+		for (const p of xmlPaths) {
+			const f = zip.file(p);
+			if (!f) continue;
+			const xml = f.asText();
+			const reNode = /<w:t[^>]*>([\s\S]*?)<\/w:t>/g;
+			let joined = "";
+			let m;
+			while ((m = reNode.exec(xml))) {
+				joined += nbspToSpace(m[1] || "");
+			}
+			if (joined && joined.indexOf(sourceText) !== -1) return true;
+		}
+		return false;
+	} catch (_) {
+		return false;
+	}
+}
+
+// Resolve an image input value to a local filesystem path for macro usage
+async function resolveImageFilePathForMacro(provided) {
+	try {
+		if (!provided) return null;
+		// If already an existing local path, use it
+		try {
+			if (fs.existsSync(provided)) return provided;
+		} catch (_) {}
+		// Data URL
+		if (
+			typeof provided === "string" &&
+			provided.startsWith("data:image/")
+		) {
+			const base64 = provided.split(",")[1] || "";
+			const buf = Buffer.from(base64, "base64");
+			const out = path.join(
+				imagesDir,
+				`macro-${Date.now()}-${Math.round(Math.random() * 1e9)}.png`
+			);
+			await sharp(buf).png().toFile(out);
+			return out;
+		}
+		// Local uploads path (relative): /uploads/images/<file>
+		const uploadPrefix = "/uploads/images/";
+		if (
+			typeof provided === "string" &&
+			(provided.startsWith(uploadPrefix) ||
+				provided.startsWith("uploads/images/"))
+		) {
+			const fname = provided.replace(/^\/?uploads\/images\//, "");
+			const full = path.join(imagesDir, fname);
+			try {
+				if (fs.existsSync(full)) return full;
+			} catch (_) {}
+		}
+		// HTTP(S) URL
+		if (typeof provided === "string" && /^https?:\/\//i.test(provided)) {
+			const resp = await fetch(provided);
+			if (!resp.ok) return null;
+			const arr = await resp.arrayBuffer();
+			const buf = Buffer.from(arr);
+			const out = path.join(
+				imagesDir,
+				`macro-${Date.now()}-${Math.round(Math.random() * 1e9)}.png`
+			);
+			await sharp(buf).png().toFile(out);
+			return out;
+		}
+		return null;
+	} catch (_) {
+		return null;
+	}
+}
+
 // Serve avatars as static assets
 app.use("/uploads/avatars", express.static(avatarsDir));
 // Serve template preview PDFs
@@ -1245,75 +1375,65 @@ async function generateFromTemplate(
 		});
 	} catch (_) {}
 
-	// Load DOCX file
-	const content = fs.readFileSync(template.sourceDocxPath, "binary");
+	// Prepare a working DOCX copy for macro-based image insertion
+	const workingDocx = path.join(
+		uploadsDir,
+		`work-${Date.now()}-${Math.round(Math.random() * 1e6)}.docx`
+	);
+	fs.copyFileSync(template.sourceDocxPath, workingDocx);
+	let tmpImagesToDelete = [];
 	try {
-		console.log("[gen] loaded template docx");
-	} catch (_) {}
-	const zip = new PizZip(content);
-
-	// Inject images for image variables before text rendering
-	try {
-		console.log("[gen] inject images (inline variables)");
-		const mediaPrefix = "word/media/";
+		const soffice = resolveSofficePath();
+		console.log("[gen] inserting inline images via macro");
 		for (const v of template.variables || []) {
 			if (v.type !== "image") continue;
 			const varKey = v.name;
 			const provided = inputValues ? inputValues[varKey] : undefined;
-			const imgBuffer = await resolveImageBuffer(provided);
-			if (!imgBuffer) continue;
-			let target =
-				v.imageTarget && v.imageTarget.startsWith("word/")
-					? v.imageTarget
-					: null;
-			if (!target) {
-				const candidates = Object.keys(zip.files || {}).filter((k) =>
-					k.startsWith(mediaPrefix)
+			const imgPath = await resolveImageFilePathForMacro(provided);
+			if (!imgPath) continue;
+			// Prefer explicit sourceText; fallback to token form {{name}}
+			const tokenText =
+				v.sourceText && String(v.sourceText).trim().length
+					? String(v.sourceText)
+					: `{{${v.name}}}`;
+			// Repeat until all occurrences are replaced
+			let attempts = 0;
+			const maxAttempts = 50;
+			while (attempts < maxAttempts) {
+				attempts++;
+				await replaceTextWithImageUsingMacro(
+					soffice,
+					imgPath,
+					workingDocx,
+					tokenText
 				);
-				if (candidates.length) target = candidates[0];
+				const stillHas = await docxContainsSourceText(
+					workingDocx,
+					tokenText
+				);
+				if (!stillHas) break;
 			}
-			if (!target) continue;
-			let finalBuf = imgBuffer;
+			// Track temp images we created (only if under imagesDir and prefixed macro-)
 			try {
-				const fmt = pickSharpFormatForTarget(target);
-				let extent =
-					v.imageExtent && v.imageExtent.cx && v.imageExtent.cy
-						? { cx: v.imageExtent.cx, cy: v.imageExtent.cy }
-						: findExtentForTargetInZip(zip, target) || null;
-				if (extent && extent.cx && extent.cy) {
-					const pxW = Math.max(
-						1,
-						Math.round((extent.cx / 914400) * 96)
-					);
-					const pxH = Math.max(
-						1,
-						Math.round((extent.cy / 914400) * 96)
-					);
-					const meta = await sharp(imgBuffer).metadata();
-					finalBuf = await sharp(imgBuffer)
-						.resize(pxW, pxH, { fit: "cover", position: "center" })
-						.toFormat(fmt)
-						.toBuffer();
-					if (meta && meta.width && meta.height) {
-						applyCoverCroppingForTarget(
-							zip,
-							target,
-							meta.width,
-							meta.height,
-							pxW,
-							pxH
-						);
-					}
-				} else {
-					finalBuf = await sharp(imgBuffer).toFormat(fmt).toBuffer();
+				if (
+					imgPath.startsWith(imagesDir) &&
+					path.basename(imgPath).startsWith("macro-")
+				) {
+					tmpImagesToDelete.push(imgPath);
 				}
 			} catch (_) {}
-			zip.file(target, finalBuf);
 		}
-		console.log("[gen] image injection done");
+		console.log("[gen] inline images inserted");
 	} catch (e) {
-		console.log("[gen] image injection skipped", e && e.message);
+		console.log(
+			"[gen] inline image macro sequence skipped",
+			e && e.message
+		);
 	}
+
+	// Load working DOCX for text rendering
+	const content = fs.readFileSync(workingDocx, "binary");
+	const zip = new PizZip(content);
 	const doc = new Docxtemplater(zip, {
 		paragraphLoop: true,
 		linebreaks: true,
@@ -1372,6 +1492,13 @@ async function generateFromTemplate(
 		}
 	}
 
+	// Prevent Docxtemplater from inserting image URLs as text; rely on LO macro for images
+	for (const v of template.variables || []) {
+		if (v.type === "image") {
+			finalValues[v.name] = null;
+		}
+	}
+
 	// Convert empty strings to null so nullGetter is used
 	Object.keys(finalValues).forEach((k) => {
 		if (finalValues[k] === "") finalValues[k] = null;
@@ -1398,6 +1525,22 @@ async function generateFromTemplate(
 	fs.writeFileSync(outDocx, buf);
 	try {
 		console.log("[gen] wrote docx", outDocx);
+	} catch (_) {}
+
+	// Cleanup working file and any temp images created for macro insertion
+	try {
+		if (workingDocx && fs.existsSync(workingDocx)) {
+			try {
+				fs.rmSync(workingDocx, { force: true });
+			} catch (_) {}
+		}
+		if (Array.isArray(tmpImagesToDelete)) {
+			for (const p of tmpImagesToDelete) {
+				try {
+					fs.rmSync(p, { force: true });
+				} catch (_) {}
+			}
+		}
 	} catch (_) {}
 
 	// Last step: refresh TOC/indexes via server macro (directly on DOCX)
@@ -2898,8 +3041,52 @@ app.post("/api/templates/:id/preview-html", async (req, res) => {
 				.status(400)
 				.json({ message: "Template was not imported from DOCX" });
 
-		// Render a temporary DOCX with values
-		const content = fs.readFileSync(template.sourceDocxPath, "binary");
+		// Render a temporary DOCX with values; first, apply inline image macro replacements
+		const workingDocx = path.join(
+			uploadsDir,
+			`work-prev-${Date.now()}-${Math.round(Math.random() * 1e6)}.docx`
+		);
+		fs.copyFileSync(template.sourceDocxPath, workingDocx);
+		let tmpImagesToDelete = [];
+		try {
+			const soffice = resolveSofficePath();
+			for (const v of template.variables || []) {
+				if (v.type !== "image") continue;
+				const varKey = v.name;
+				const provided = values ? values[varKey] : undefined;
+				const imgPath = await resolveImageFilePathForMacro(provided);
+				if (!imgPath) continue;
+				const tokenText =
+					v.sourceText && String(v.sourceText).trim().length
+						? String(v.sourceText)
+						: `{{${v.name}}}`;
+				let attempts = 0;
+				const maxAttempts = 50;
+				while (attempts < maxAttempts) {
+					attempts++;
+					await replaceTextWithImageUsingMacro(
+						soffice,
+						imgPath,
+						workingDocx,
+						tokenText
+					);
+					const stillHas = await docxContainsSourceText(
+						workingDocx,
+						tokenText
+					);
+					if (!stillHas) break;
+				}
+				try {
+					if (
+						imgPath.startsWith(imagesDir) &&
+						path.basename(imgPath).startsWith("macro-")
+					) {
+						tmpImagesToDelete.push(imgPath);
+					}
+				} catch (_) {}
+			}
+		} catch (_) {}
+		const content = fs.readFileSync(workingDocx, "binary");
 		const zip = new PizZip(content);
 		const doc = new Docxtemplater(zip, {
 			paragraphLoop: true,
@@ -3017,6 +3204,13 @@ app.post("/api/templates/:id/preview-html", async (req, res) => {
 			}
 		}
 
+		// Prevent image variables from rendering as text (URLs); macro already inserted images
+		for (const v of template.variables || []) {
+			if (v.type === "image") {
+				finalValues[v.name] = null;
+			}
+		}
+
 		// Convert empty to null to reveal placeholders in preview
 		Object.keys(finalValues).forEach((k) => {
 			if (finalValues[k] === "") finalValues[k] = null;
@@ -3036,6 +3230,20 @@ app.post("/api/templates/:id/preview-html", async (req, res) => {
 		} catch (_) {}
 
 		const filledBuf = doc.getZip().generate({ type: "nodebuffer" });
+		try {
+			if (workingDocx && fs.existsSync(workingDocx)) {
+				try {
+					fs.rmSync(workingDocx, { force: true });
+				} catch (_) {}
+			}
+			if (Array.isArray(tmpImagesToDelete)) {
+				for (const p of tmpImagesToDelete) {
+					try {
+						fs.rmSync(p, { force: true });
+					} catch (_) {}
+				}
+			}
+		} catch (_) {}
 		// Convert to HTML for WYSIWYG-ish preview in-memory without writing files
 		const { value: html } = await mammoth.convertToHtml({
 			buffer: filledBuf,
