@@ -1012,8 +1012,7 @@ app.post(
 					k.endsWith(".xml") &&
 					!k.includes("/_rels/")
 			);
-			const tokenSet = new Set();
-			const canonicalSet = new Set();
+			const tokens = [];
 			for (const p of xmlPaths) {
 				const f = zip.file(p);
 				if (!f) continue;
@@ -1045,10 +1044,8 @@ app.post(
 					if (!name) continue;
 					// Guard against any residual markup sneaking through
 					if (/[<>]/.test(name)) continue;
-					const canonical = name.toLowerCase();
-					if (canonicalSet.has(canonical)) continue;
-					canonicalSet.add(canonical);
-					tokenSet.add(name);
+					// Push every occurrence; do not de-duplicate by name
+					tokens.push(name);
 				}
 			}
 			// Enumerate media placeholders
@@ -1063,7 +1060,7 @@ app.post(
 						fileName: path.basename(target),
 					};
 				});
-			const variables = Array.from(tokenSet).map((name) => ({
+			const variables = tokens.map((name) => ({
 				id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
 				name,
 			}));
