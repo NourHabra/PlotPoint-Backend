@@ -2183,6 +2183,9 @@ app.post("/api/templates/finalize-import", async (req, res) => {
 // Generate filled DOCX and optionally PDF
 app.post("/api/templates/:id/generate", async (req, res) => {
 	try {
+		// Ensure this long-running request doesn't time out
+		req.setTimeout(15 * 60 * 1000);
+		res.setTimeout(15 * 60 * 1000);
 		const { id } = req.params;
 		const { values, output = "docx", kmlData } = req.body || {}; // values: { [name]: value }
 		const template = await Template.findById(id);
@@ -2977,6 +2980,9 @@ app.put("/api/reports/:id", async (req, res) => {
 // Generate from Report
 app.post("/api/reports/:id/generate", async (req, res) => {
 	try {
+		// Ensure this long-running request doesn't time out
+		req.setTimeout(15 * 60 * 1000);
+		res.setTimeout(15 * 60 * 1000);
 		const { id } = req.params;
 		const { output = "docx" } = req.body || {};
 		const payload = getAuthPayload(req);
@@ -3112,6 +3118,9 @@ app.post("/api/reports/:id/generate", async (req, res) => {
 // Preview from Report (appendix included, no status gate)
 app.post("/api/reports/:id/preview-pdf", async (req, res) => {
 	try {
+		// Ensure this long-running request doesn't time out
+		req.setTimeout(15 * 60 * 1000);
+		res.setTimeout(15 * 60 * 1000);
 		const { id } = req.params;
 		const payload = getAuthPayload(req);
 		if (!payload) return res.status(401).json({ message: "Unauthorized" });
@@ -3573,9 +3582,14 @@ app.patch("/api/templates/:id/reactivate", async (req, res) => {
 });
 
 // Start server
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
 	console.log(`Server is running on port ${PORT}`);
 });
+// Extend timeouts to support long-running report generations
+server.requestTimeout = 15 * 60 * 1000; // 15 minutes
+server.headersTimeout = 16 * 60 * 1000; // slightly higher than requestTimeout
+server.keepAliveTimeout = 75 * 1000; // typical safe value
+server.setTimeout(15 * 60 * 1000);
 
 // ----- Changelog APIs -----
 // List changelog entries (newest first)
