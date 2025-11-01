@@ -134,12 +134,8 @@ function resolveSofficePath() {
 }
 
 async function convertDocxToPdf(sofficePath, inputDocxPath, outputDir) {
-	// Isolated profile to avoid lock/state issues
-	const profileDir = path.join(outputDir, `lo-profile-${Date.now()}`);
-	try {
-		fs.mkdirSync(profileDir, { recursive: true });
-	} catch (_) {}
-	const profileUrl = `file:///${profileDir.replace(/\\/g, "/")}`;
+	// Use shared LO profile to avoid startup cost each run
+	const profileUrl = `file:///${loProfileDir.replace(/\\/g, "/")}`;
 
 	const makeArgs = (filter) => [
 		"--headless",
@@ -179,11 +175,6 @@ async function convertDocxToPdf(sofficePath, inputDocxPath, outputDir) {
 		await tryExec(makeArgs("pdf:writer_pdf_Export"));
 	} catch (_) {
 		await tryExec(makeArgs("pdf"));
-	} finally {
-		// Cleanup LibreOffice user profile directory
-		try {
-			fs.rmSync(profileDir, { recursive: true, force: true });
-		} catch (_) {}
 	}
 }
 
@@ -344,6 +335,8 @@ const uploadsDir = path.join(__dirname, "uploads");
 if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir);
 const templatePreviewsDir = path.join(uploadsDir, "template-previews");
 const imagesDir = path.join(uploadsDir, "images");
+// Shared LibreOffice user profile (avoid per-run profile creation cost)
+const loProfileDir = path.join(uploadsDir, "lo-profile");
 // Appendix storage base
 const appendixBaseDir = path.join(uploadsDir, "appendix");
 const appendixTmpDir = path.join(appendixBaseDir, "tmp");
@@ -360,6 +353,9 @@ try {
 } catch (_) {}
 try {
 	fs.mkdirSync(appendixTmpDir, { recursive: true });
+} catch (_) {}
+try {
+	fs.mkdirSync(loProfileDir, { recursive: true });
 } catch (_) {}
 // Ensure stats log file exists (create empty if missing)
 try {
@@ -442,7 +438,7 @@ async function runPdftoppmToPng(inputPdfPath, pagesDir, baseName, dpi) {
 		const args = [
 			"-png",
 			"-r",
-			String(dpi || 200),
+			String(dpi || Number(process.env.PDF_PAGE_IMAGE_DPI || 200)),
 			inputPdfPath,
 			path.join(pagesDir, baseName),
 		];
@@ -1772,23 +1768,6 @@ async function generateFromTemplate(
 	if (output === "pdf") {
 		console.log("[gen] converting to pdf");
 		const sofficePrimary = resolveSofficePath();
-		// Preflight: verify soffice is reachable (supports PATH)
-		try {
-			await new Promise((resolve, reject) => {
-				execFile(sofficePrimary, ["--headless", "--version"], (err) =>
-					err ? reject(err) : resolve()
-				);
-			});
-		} catch (err) {
-			try {
-				fs.rmSync(outDocx, { force: true });
-			} catch (_) {}
-			return res.status(500).json({
-				message:
-					"LibreOffice not found or not accessible. Install LibreOffice or set LIBREOFFICE_PATH to soffice(.com)",
-				detail: err && err.message ? err.message : String(err),
-			});
-		}
 		const outDir = uploadsDir;
 		// Try conversion with primary path first
 		let convertError = null;
@@ -2771,8 +2750,7 @@ app.post(
 					const imgs = await runPdftoppmToPng(
 						pdfPath,
 						pagesDir,
-						baseName,
-						200
+						baseName
 					);
 					itemDoc.pageImages = imgs;
 					itemDoc.pageCount = imgs.length;
