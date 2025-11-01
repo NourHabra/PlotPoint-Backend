@@ -96,6 +96,7 @@ const Ticket = require("./models/Ticket");
 const User = require("./models/User");
 const UserTemplate = require("./models/UserTemplate");
 const ChangeLog = require("./models/ChangeLog");
+const GenerationStat = require("./models/GenerationStat");
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
 
@@ -346,6 +347,8 @@ const imagesDir = path.join(uploadsDir, "images");
 // Appendix storage base
 const appendixBaseDir = path.join(uploadsDir, "appendix");
 const appendixTmpDir = path.join(appendixBaseDir, "tmp");
+// Stats log file (append-only JSON lines)
+const generationStatsLogFile = path.join(uploadsDir, "generation-stats.txt");
 try {
 	fs.mkdirSync(templatePreviewsDir, { recursive: true });
 } catch (_) {}
@@ -357,6 +360,12 @@ try {
 } catch (_) {}
 try {
 	fs.mkdirSync(appendixTmpDir, { recursive: true });
+} catch (_) {}
+// Ensure stats log file exists (create empty if missing)
+try {
+	if (!fs.existsSync(generationStatsLogFile)) {
+		fs.writeFileSync(generationStatsLogFile, "", { encoding: "utf8" });
+	}
 } catch (_) {}
 
 const storage = multer.diskStorage({
@@ -1248,6 +1257,32 @@ app.get("/api/users", async (req, res) => {
 	}
 });
 
+// Admin: list generation stats (paginated)
+app.get("/api/admin/generation-stats", async (req, res) => {
+	try {
+		const payload = getAuthPayload(req);
+		if (!payload || payload.role !== "Admin") {
+			return res
+				.status(403)
+				.json({ message: "Admin privileges required" });
+		}
+		const page = Math.max(1, Number(req.query.page || 1));
+		const limit = Math.min(200, Math.max(1, Number(req.query.limit || 25)));
+		const skip = (page - 1) * limit;
+		const [items, total] = await Promise.all([
+			GenerationStat.find({})
+				.sort({ createdAt: -1 })
+				.skip(skip)
+				.limit(limit)
+				.lean(),
+			GenerationStat.countDocuments({}),
+		]);
+		return res.json({ items, total, page, limit });
+	} catch (error) {
+		return res.status(500).json({ message: error.message });
+	}
+});
+
 // Current user profile
 app.get("/api/users/me", async (req, res) => {
 	try {
@@ -1409,12 +1444,14 @@ async function generateFromTemplate(
 	try {
 		const soffice = resolveSofficePath();
 		console.log("[gen] inserting inline images via macro");
+		let inlineImagesCount = 0;
 		for (const v of template.variables || []) {
 			if (v.type !== "image") continue;
 			const varKey = v.name;
 			const provided = inputValues ? inputValues[varKey] : undefined;
 			const imgPath = await resolveImageFilePathForMacro(provided);
 			if (!imgPath) continue;
+			inlineImagesCount++;
 			// Prefer explicit sourceText; fallback to token form {{name}}
 			const tokenText =
 				v.sourceText && String(v.sourceText).trim().length
@@ -1448,6 +1485,10 @@ async function generateFromTemplate(
 			} catch (_) {}
 		}
 		console.log("[gen] inline images inserted");
+		try {
+			if (res && res.locals)
+				res.locals.inlineImagesCount = inlineImagesCount;
+		} catch (_) {}
 	} catch (e) {
 		console.log(
 			"[gen] inline image macro sequence skipped",
@@ -2971,11 +3012,98 @@ app.post("/api/reports/:id/generate", async (req, res) => {
 			}
 			return originalEnd(...args);
 		};
-		return generateFromTemplate(template, report.values, output, res, {
+		const startedAt = Date.now();
+		try {
+			console.log(
+				"[gen][timing] start",
+				new Date(startedAt).toISOString(),
+				{
+					reportId: String(report._id || ""),
+					reportName: String(report.name || report.title || ""),
+					templateId: String(
+						report.templateId || (template && template._id) || ""
+					),
+					templateName: String(
+						(template && template.name) || report.templateName || ""
+					),
+					output,
+				}
+			);
+		} catch (_) {}
+		await generateFromTemplate(template, report.values, output, res, {
 			appendixItems: Array.isArray(report.appendixItems)
 				? report.appendixItems
 				: [],
 		});
+		const finishedAt = Date.now();
+		const durationMs = finishedAt - startedAt;
+		try {
+			const inlineImages = (() => {
+				try {
+					return Number(
+						res && res.locals && res.locals.inlineImagesCount
+							? res.locals.inlineImagesCount
+							: 0
+					);
+				} catch (_) {
+					return 0;
+				}
+			})();
+			const appendixItems = (() => {
+				try {
+					const items = Array.isArray(report.appendixItems)
+						? report.appendixItems
+						: [];
+					let total = 0;
+					for (const it of items) {
+						if (!it) continue;
+						if (it.kind === "image") {
+							total += 1;
+							continue;
+						}
+						if (it.kind === "pdf") {
+							if (
+								Array.isArray(it.pageImages) &&
+								it.pageImages.length
+							)
+								total += it.pageImages.length;
+							else if (
+								typeof it.pageCount === "number" &&
+								it.pageCount > 0
+							)
+								total += it.pageCount;
+						}
+					}
+					return total;
+				} catch (_) {
+					return 0;
+				}
+			})();
+			const reportName = String(report.name || report.title || "");
+			const templateName = String(
+				(template && template.name) || report.templateName || ""
+			);
+			try {
+				const userId = String(payload.sub || payload.email || "");
+				const username = String(payload.name || "");
+				const email = String(payload.email || "");
+				await GenerationStat.create({
+					timestamp: new Date(),
+					reportId: report._id,
+					reportName,
+					templateId: report.templateId || (template && template._id),
+					templateName,
+					output,
+					durationMs,
+					inlineImages,
+					appendixItems,
+					userId,
+					username,
+					email,
+				});
+			} catch (_) {}
+		} catch (_) {}
+		return;
 	} catch (error) {
 		res.status(500).json({ message: error.message });
 	}
@@ -2993,11 +3121,99 @@ app.post("/api/reports/:id/preview-pdf", async (req, res) => {
 		if (String(report.createdBy) !== String(payload.sub || payload.email))
 			return res.status(403).json({ message: "Forbidden" });
 		const template = await Template.findById(report.templateId);
-		return generateFromTemplate(template, report.values, "pdf", res, {
+		const output = "pdf";
+		const startedAt = Date.now();
+		try {
+			console.log(
+				"[gen][timing][preview] start",
+				new Date(startedAt).toISOString(),
+				{
+					reportId: String(report._id || ""),
+					reportName: String(report.name || report.title || ""),
+					templateId: String(
+						report.templateId || (template && template._id) || ""
+					),
+					templateName: String(
+						(template && template.name) || report.templateName || ""
+					),
+					output,
+				}
+			);
+		} catch (_) {}
+		await generateFromTemplate(template, report.values, output, res, {
 			appendixItems: Array.isArray(report.appendixItems)
 				? report.appendixItems
 				: [],
 		});
+		const finishedAt = Date.now();
+		const durationMs = finishedAt - startedAt;
+		try {
+			const inlineImages = (() => {
+				try {
+					return Number(
+						res && res.locals && res.locals.inlineImagesCount
+							? res.locals.inlineImagesCount
+							: 0
+					);
+				} catch (_) {
+					return 0;
+				}
+			})();
+			const appendixItems = (() => {
+				try {
+					const items = Array.isArray(report.appendixItems)
+						? report.appendixItems
+						: [];
+					let total = 0;
+					for (const it of items) {
+						if (!it) continue;
+						if (it.kind === "image") {
+							total += 1;
+							continue;
+						}
+						if (it.kind === "pdf") {
+							if (
+								Array.isArray(it.pageImages) &&
+								it.pageImages.length
+							)
+								total += it.pageImages.length;
+							else if (
+								typeof it.pageCount === "number" &&
+								it.pageCount > 0
+							)
+								total += it.pageCount;
+						}
+					}
+					return total;
+				} catch (_) {
+					return 0;
+				}
+			})();
+			const reportName = String(report.name || report.title || "");
+			const templateName = String(
+				(template && template.name) || report.templateName || ""
+			);
+			try {
+				const userId = String(payload.sub || payload.email || "");
+				const username = String(payload.name || "");
+				const email = String(payload.email || "");
+				await GenerationStat.create({
+					timestamp: new Date(),
+					reportId: report._id,
+					reportName,
+					templateId: report.templateId || (template && template._id),
+					templateName,
+					output,
+					durationMs,
+					inlineImages,
+					appendixItems,
+					userId,
+					username,
+					email,
+				});
+			} catch (_) {}
+		} catch (_) {}
+		return;
 	} catch (error) {
 		return res.status(500).json({ message: error.message });
 	}
