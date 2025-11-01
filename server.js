@@ -532,6 +532,51 @@ async function appendImageToDocWithMacro(
 	});
 }
 
+// Insert multiple images in one shot using LibreOffice batch macro
+async function appendImagesBatchToDocWithMacro(
+	sofficePath,
+	imagePaths,
+	targetDocxPath
+) {
+	if (!Array.isArray(imagePaths) || imagePaths.length === 0) return;
+	const docUrl = pathToEncodedFileUrl(targetDocxPath);
+	const imagesArg = imagePaths.map((p) => pathToEncodedFileUrl(p)).join("|");
+	// Order per new macro signature: (docPath, imagesPipeString)
+	const macroArg = `macro:///Standard.Appendix.InsertPhotos_FitToPage(${docUrl},${imagesArg})`;
+	const args = [
+		"--headless",
+		"--invisible",
+		"--nologo",
+		"--norestore",
+		macroArg,
+	];
+	try {
+		console.log(`[appendix][batch][cmd] ${sofficePath} ${args.join(" ")}`);
+	} catch (_) {}
+	await new Promise((resolve, reject) => {
+		execFile(
+			sofficePath,
+			args,
+			{ windowsHide: true },
+			(err, stdout, stderr) => {
+				if (err) {
+					const detail =
+						(stderr && String(stderr)) ||
+						(stdout && String(stdout)) ||
+						err.message;
+					return reject(new Error(detail));
+				}
+				try {
+					console.log(
+						`[appendix][batch][ok] ${sofficePath} ${args.join(" ")}`
+					);
+				} catch (_) {}
+				resolve();
+			}
+		);
+	});
+}
+
 // Insert an image by replacing a specific text token using LibreOffice macro
 async function replaceTextWithImageUsingMacro(
 	sofficePath,
@@ -1635,27 +1680,27 @@ async function generateFromTemplate(
 					.sort(
 						(a, b) => Number(a.order || 0) - Number(b.order || 0)
 					);
+				const batchImages = [];
 				for (const it of sorted) {
 					if (!it || !it.kind) continue;
 					if (it.kind === "image" && it.originalPath) {
-						await appendImageToDocWithMacro(
-							soffice,
-							it.originalPath,
-							outDocx
-						);
+						batchImages.push(it.originalPath);
 						continue;
 					}
 					if (it.kind === "pdf" && Array.isArray(it.pageImages)) {
 						for (const p of it.pageImages) {
-							await appendImageToDocWithMacro(
-								soffice,
-								p,
-								outDocx
-							);
+							batchImages.push(p);
 						}
 					}
 				}
-				console.log("[gen] appendix appended");
+				if (batchImages.length > 0) {
+					await appendImagesBatchToDocWithMacro(
+						soffice,
+						batchImages,
+						outDocx
+					);
+				}
+				console.log("[gen] appendix appended (batch)");
 			} else {
 				console.log("[gen] no appendix items");
 			}
