@@ -622,6 +622,59 @@ async function replaceTextWithImageUsingMacro(
 	});
 }
 
+// Replace multiple placeholders with images in one shot using Inline module macro
+async function replacePlaceholdersWithImagesBatchUsingMacro(
+	sofficePath,
+	targetDocxPath,
+	pairs /* Array<[tokenText:string, imagePath:string]> */
+) {
+	if (!Array.isArray(pairs) || pairs.length === 0) return;
+	const docUrl = pathToEncodedFileUrl(targetDocxPath);
+	const pairsArg = pairs
+		.map(
+			([token, imgPath]) =>
+				`${String(token)}::${pathToEncodedFileUrl(imgPath)}`
+		)
+		.join("|");
+	const macroArg = `macro:///Standard.Inline.InsertPhotosByPlaceholders_FitToPage(${docUrl},${pairsArg})`;
+	const args = [
+		"--headless",
+		"--norestore",
+		"--nolockcheck",
+		"--nodefault",
+		macroArg,
+	];
+	try {
+		console.log(
+			`[inline-img][batch][cmd] ${sofficePath} ${args.join(" ")}`
+		);
+	} catch (_) {}
+	await new Promise((resolve, reject) => {
+		execFile(
+			sofficePath,
+			args,
+			{ windowsHide: true },
+			(err, stdout, stderr) => {
+				if (err) {
+					const detail =
+						(stderr && String(stderr)) ||
+						(stdout && String(stdout)) ||
+						err.message;
+					return reject(new Error(detail));
+				}
+				try {
+					console.log(
+						`[inline-img][batch][ok] ${sofficePath} ${args.join(
+							" "
+						)}`
+					);
+				} catch (_) {}
+				resolve();
+			}
+		);
+	});
+}
+
 // Check if a DOCX still contains the given source text (robust across split <w:t> runs)
 async function docxContainsSourceText(docxPath, sourceText) {
 	try {
@@ -1488,8 +1541,9 @@ async function generateFromTemplate(
 	let tmpImagesToDelete = [];
 	try {
 		const soffice = resolveSofficePath();
-		console.log("[gen] inserting inline images via macro");
+		console.log("[gen] inserting inline images via macro (batch)");
 		let inlineImagesCount = 0;
+		const inlinePairs = [];
 		for (const v of template.variables || []) {
 			if (v.type !== "image") continue;
 			const varKey = v.name;
@@ -1497,28 +1551,11 @@ async function generateFromTemplate(
 			const imgPath = await resolveImageFilePathForMacro(provided);
 			if (!imgPath) continue;
 			inlineImagesCount++;
-			// Prefer explicit sourceText; fallback to token form {{name}}
 			const tokenText =
 				v.sourceText && String(v.sourceText).trim().length
 					? String(v.sourceText)
 					: `{{${v.name}}}`;
-			// Repeat until all occurrences are replaced
-			let attempts = 0;
-			const maxAttempts = 50;
-			while (attempts < maxAttempts) {
-				attempts++;
-				await replaceTextWithImageUsingMacro(
-					soffice,
-					imgPath,
-					workingDocx,
-					tokenText
-				);
-				const stillHas = await docxContainsSourceText(
-					workingDocx,
-					tokenText
-				);
-				if (!stillHas) break;
-			}
+			inlinePairs.push([tokenText, imgPath]);
 			// Track temp images we created (only if under imagesDir and prefixed macro-)
 			try {
 				if (
@@ -1529,7 +1566,14 @@ async function generateFromTemplate(
 				}
 			} catch (_) {}
 		}
-		console.log("[gen] inline images inserted");
+		if (inlinePairs.length > 0) {
+			await replacePlaceholdersWithImagesBatchUsingMacro(
+				soffice,
+				workingDocx,
+				inlinePairs
+			);
+		}
+		console.log("[gen] inline images inserted (batch)");
 		try {
 			if (res && res.locals)
 				res.locals.inlineImagesCount = inlineImagesCount;
@@ -3355,6 +3399,7 @@ app.post("/api/templates/:id/preview-html", async (req, res) => {
 		let tmpImagesToDelete = [];
 		try {
 			const soffice = resolveSofficePath();
+			const inlinePairs = [];
 			for (const v of template.variables || []) {
 				if (v.type !== "image") continue;
 				const varKey = v.name;
@@ -3365,22 +3410,7 @@ app.post("/api/templates/:id/preview-html", async (req, res) => {
 					v.sourceText && String(v.sourceText).trim().length
 						? String(v.sourceText)
 						: `{{${v.name}}}`;
-				let attempts = 0;
-				const maxAttempts = 50;
-				while (attempts < maxAttempts) {
-					attempts++;
-					await replaceTextWithImageUsingMacro(
-						soffice,
-						imgPath,
-						workingDocx,
-						tokenText
-					);
-					const stillHas = await docxContainsSourceText(
-						workingDocx,
-						tokenText
-					);
-					if (!stillHas) break;
-				}
+				inlinePairs.push([tokenText, imgPath]);
 				try {
 					if (
 						imgPath.startsWith(imagesDir) &&
@@ -3389,6 +3419,13 @@ app.post("/api/templates/:id/preview-html", async (req, res) => {
 						tmpImagesToDelete.push(imgPath);
 					}
 				} catch (_) {}
+			}
+			if (inlinePairs.length > 0) {
+				await replacePlaceholdersWithImagesBatchUsingMacro(
+					soffice,
+					workingDocx,
+					inlinePairs
+				);
 			}
 		} catch (_) {}
 		const content = fs.readFileSync(workingDocx, "binary");
