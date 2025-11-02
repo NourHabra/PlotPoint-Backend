@@ -485,49 +485,6 @@ async function runPdftoppmToPng(inputPdfPath, pagesDir, baseName, dpi) {
 	});
 }
 
-async function appendImageToDocWithMacro(
-	sofficePath,
-	imagePath,
-	targetDocxPath
-) {
-	const imgUrl = pathToEncodedFileUrl(imagePath);
-	const docUrl = pathToEncodedFileUrl(targetDocxPath);
-	// Note: do NOT wrap macro arg in quotes; execFile does not use a shell
-	const macroArg = `macro:///Standard.Insert.InsertPhotoSaveAndClose_FitToPage(${imgUrl},${docUrl})`;
-	const args = [
-		"--headless",
-		"--invisible",
-		"--nologo",
-		"--norestore",
-		macroArg,
-	];
-	try {
-		console.log(`[appendix][cmd] ${sofficePath} ${args.join(" ")}`);
-	} catch (_) {}
-	await new Promise((resolve, reject) => {
-		execFile(
-			sofficePath,
-			args,
-			{ windowsHide: true },
-			(err, stdout, stderr) => {
-				if (err) {
-					const detail =
-						(stderr && String(stderr)) ||
-						(stdout && String(stdout)) ||
-						err.message;
-					return reject(new Error(detail));
-				}
-				try {
-					console.log(
-						`[appendix][ok] ${sofficePath} ${args.join(" ")}`
-					);
-				} catch (_) {}
-				resolve();
-			}
-		);
-	});
-}
-
 // Insert multiple images in one shot using LibreOffice batch macro
 async function appendImagesBatchToDocWithMacro(
 	sofficePath,
@@ -565,51 +522,6 @@ async function appendImagesBatchToDocWithMacro(
 				try {
 					console.log(
 						`[appendix][batch][ok] ${sofficePath} ${args.join(" ")}`
-					);
-				} catch (_) {}
-				resolve();
-			}
-		);
-	});
-}
-
-// Insert an image by replacing a specific text token using LibreOffice macro
-async function replaceTextWithImageUsingMacro(
-	sofficePath,
-	imagePath,
-	targetDocxPath,
-	sourceText
-) {
-	const imgUrl = pathToEncodedFileUrl(imagePath);
-	const docUrl = pathToEncodedFileUrl(targetDocxPath);
-	// Pass the raw source text; do not quote (execFile avoids shell parsing)
-	const macroArg = `macro:///Standard.Insert.InsertPhotoReplaceText_FitToPage(${imgUrl},${docUrl},${sourceText})`;
-	const args = [
-		"--headless",
-		"--invisible",
-		"--nologo",
-		"--norestore",
-		macroArg,
-	];
-	try {
-		console.log(`[inline-img][cmd] ${sofficePath} ${args.join(" ")}`);
-	} catch (_) {}
-	await new Promise((resolve, reject) => {
-		execFile(
-			sofficePath,
-			args,
-			{ windowsHide: true },
-			(err, stdout, stderr) => {
-				if (err) {
-					const detail =
-						(stderr && String(stderr)) ||
-						(stdout && String(stdout)) ||
-						err.message;
-					return reject(new Error(detail));
-				}
-				try {
-					console.log(
-						`[inline-img][ok] ${sofficePath} ${args.join(" ")}`
 					);
 				} catch (_) {}
 				resolve();
