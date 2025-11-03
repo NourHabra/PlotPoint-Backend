@@ -189,28 +189,37 @@ function pathToEncodedFileUrl(p) {
 	return encodeURI(pathToFileUrl(p));
 }
 
-// Format a date string into "Mon DD, YYYY"; falls back to input if invalid
+// Format a date string into Greek "D MMMM, YYYY"; falls back to input if invalid
 function formatDateForReport(input) {
 	try {
 		if (!input) return input;
+
+		// Helper to format using Greek locale and enforce comma before year
+		const formatEl = (date, opts = {}) => {
+			const fmt = new Intl.DateTimeFormat("el-GR", {
+				month: "long",
+				day: "numeric",
+				year: "numeric",
+				...opts,
+			});
+			const parts = fmt.formatToParts(date);
+			const day = parts.find((p) => p.type === "day")?.value;
+			const month = parts.find((p) => p.type === "month")?.value;
+			const year = parts.find((p) => p.type === "year")?.value;
+			if (day && month && year) return `${day} ${month}, ${year}`;
+			return fmt.format(date);
+		};
+
 		// Handle typical browser date input (YYYY-MM-DD) without TZ shifts
 		if (typeof input === "string" && /^\d{4}-\d{2}-\d{2}$/.test(input)) {
 			const [y, m, d] = input.split("-").map((x) => parseInt(x, 10));
 			const dt = new Date(Date.UTC(y, m - 1, d));
-			return dt.toLocaleDateString("en-US", {
-				month: "short",
-				day: "2-digit",
-				year: "numeric",
-				timeZone: "UTC",
-			});
+			return formatEl(dt, { timeZone: "UTC" });
 		}
+
 		const dt = new Date(input);
 		if (isNaN(dt.getTime())) return input;
-		return dt.toLocaleDateString("en-US", {
-			month: "short",
-			day: "2-digit",
-			year: "numeric",
-		});
+		return formatEl(dt);
 	} catch (_) {
 		return input;
 	}
@@ -1552,7 +1561,7 @@ async function generateFromTemplate(
 				finalValues[v.name] = "";
 			}
 		}
-		// Normalize date variables to "Mon DD, YYYY"
+		// Normalize date variables to Greek "D MMMM, YYYY"
 		if (v.type === "date") {
 			const raw = finalValues[v.name];
 			if (
@@ -3436,7 +3445,7 @@ app.post("/api/templates/:id/preview-html", async (req, res) => {
 			}
 		}
 
-		// Normalize date variables to "Mon DD, YYYY"
+		// Normalize date variables to Greek "D MMMM, YYYY"
 		for (const v of template.variables || []) {
 			if (v.type === "date") {
 				const raw = finalValues[v.name];
