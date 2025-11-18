@@ -11,6 +11,7 @@ const mammoth = require("mammoth");
 const pathLib = require("path");
 const fetch = require("node-fetch");
 const sharp = require("sharp");
+const pdfParse = require("pdf-parse");
 require("dotenv").config();
 
 // Robust recursive delete utilities (handle Windows EPERM/EBUSY cases)
@@ -1205,6 +1206,101 @@ app.post("/api/uploads/image", uploadImage.single("file"), async (req, res) => {
 		return res.status(400).json({ message: error.message });
 	}
 });
+
+// PDF extraction endpoint for extracting "Αρ. Εκτίμησης" value
+app.post(
+	"/api/uploads/extract-pdf",
+	upload.single("file"),
+	async (req, res) => {
+		try {
+			if (!req.file)
+				return res
+					.status(400)
+					.json({ message: "PDF file is required" });
+
+			const ext = path.extname(req.file.originalname || "").toLowerCase();
+			if (ext !== ".pdf")
+				return res.status(400).json({ message: "File must be a PDF" });
+
+			// Read PDF file
+			const dataBuffer = fs.readFileSync(req.file.path);
+			const pdfData = await pdfParse(dataBuffer);
+
+			// Extract text from PDF
+			const text = pdfData.text;
+
+			// Find the value after "Αρ. Εκτίμησης"
+			// Look for the pattern "Αρ. Εκτίμησης" followed by the value (e.g., "2025/78217")
+			const searchText = "Αρ. Εκτίμησης";
+			const index = text.indexOf(searchText);
+
+			if (index === -1) {
+				// Clean up uploaded file
+				try {
+					fs.unlinkSync(req.file.path);
+				} catch (_) {}
+				return res.status(404).json({
+					message: `Could not find "${searchText}" in the PDF`,
+				});
+			}
+
+			// Extract the value after the search text
+			// Skip the search text and any whitespace/newlines
+			let startIndex = index + searchText.length;
+			// Skip whitespace and common separators
+			while (
+				startIndex < text.length &&
+				/[\s:]/g.test(text[startIndex])
+			) {
+				startIndex++;
+			}
+
+			// Extract the value (format like "2025/78217" or similar)
+			// Match numbers, slashes, dashes, and word characters that form a reference number
+			let endIndex = startIndex;
+			const valuePattern = /[0-9/\-A-Za-z]/;
+			while (
+				endIndex < text.length &&
+				valuePattern.test(text[endIndex])
+			) {
+				endIndex++;
+			}
+
+			let extractedValue = text.substring(startIndex, endIndex).trim();
+
+			// Clean up: remove any trailing non-alphanumeric characters except slash
+			extractedValue = extractedValue.replace(/[^0-9/\-A-Za-z]+$/, "");
+
+			if (!extractedValue) {
+				// Clean up uploaded file
+				try {
+					fs.unlinkSync(req.file.path);
+				} catch (_) {}
+				return res.status(404).json({
+					message: `Found "${searchText}" but could not extract the value after it`,
+				});
+			}
+
+			// Clean up uploaded file
+			try {
+				fs.unlinkSync(req.file.path);
+			} catch (_) {}
+
+			return res.status(200).json({
+				extractedValue: extractedValue,
+				searchText: searchText,
+			});
+		} catch (error) {
+			// Clean up uploaded file on error
+			if (req.file && req.file.path) {
+				try {
+					fs.unlinkSync(req.file.path);
+				} catch (_) {}
+			}
+			return res.status(500).json({ message: error.message });
+		}
+	}
+);
 
 app.post("/api/auth/login", async (req, res) => {
 	try {
