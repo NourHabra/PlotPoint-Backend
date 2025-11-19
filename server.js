@@ -1457,48 +1457,134 @@ app.post(
 				}
 			}
 
-			// 3. Extract "Υπάλληλος Τράπεζας" from "Επαφή Maria Kriticou Tηλέφωνο"
-			// Extract text between "Επαφή" and "Tηλέφωνο" (handles accent variations and T vs Τ)
+			// 3. Extract "Υπάλληλος Τράπεζας" from "Επαφή Maria Kriticou Tηλέφωνο" or "Επαφή\nName\nPhone"
+			// Extract text between "Επαφή" and "Tηλέφωνο" or phone number (handles multi-line names)
 			let ypallilosTrapezas = null;
 
-			// Create accent-insensitive patterns for "Επαφή" and "Τηλέφωνο"
+			// Create accent-insensitive pattern for "Επαφή"
 			const epafiPattern = createAccentInsensitivePattern("Επαφή");
-			// Create pattern that handles both Latin T and Greek Tau (Τ)
-			// Build pattern manually to handle T/Τ variation
+			// Create pattern that handles both Latin T and Greek Tau (Τ) for "Τηλέφωνο"
 			const tilefonoBase = "ηλέφωνο";
 			const tilefonoAccentPattern =
 				createAccentInsensitivePattern(tilefonoBase);
-			// Create pattern: [TΤ] + accent-insensitive pattern for the rest
 			const tilefonoPattern = new RegExp(
 				"[TΤ]" + tilefonoAccentPattern.source,
 				"i"
 			);
+			// Pattern for phone number: 8+ digits followed by closing parenthesis
+			// This matches patterns like "22500680)" - the closing paren is required
+			const phonePattern = /\d{8,}\)/;
+			// Also check for "Κατάστημα" as a stop marker (in case phone number pattern doesn't match)
+			const katastimaStopPattern =
+				createAccentInsensitivePattern("Κατάστημα");
 
 			const epafiMatch = text.match(epafiPattern);
 			if (epafiMatch && epafiMatch.index !== undefined) {
 				const epafiIndex = epafiMatch.index;
 				const epafiLength = epafiMatch[0].length;
-
-				// Search for "Τηλέφωνο" or "Tηλέφωνο" after "Επαφή"
 				const textAfterEpafi = text.substring(epafiIndex + epafiLength);
-				const tilefonoMatch = textAfterEpafi.match(tilefonoPattern);
 
+				// Skip whitespace and newlines at the start
+				let valueStart = epafiIndex + epafiLength;
+				while (
+					valueStart < text.length &&
+					/[\s\n\r]/.test(text[valueStart])
+				) {
+					valueStart++;
+				}
+
+				// Find all potential stop markers and use the earliest one
+				let endIndex = -1;
+				const stopMarkers = [];
+
+				// Try to find "Τηλέφωνο" or "Tηλέφωνο"
+				const tilefonoMatch = textAfterEpafi.match(tilefonoPattern);
 				if (tilefonoMatch && tilefonoMatch.index !== undefined) {
-					const startIndex = epafiIndex + epafiLength;
-					// Skip whitespace
-					let valueStart = startIndex;
+					stopMarkers.push({
+						index: epafiIndex + epafiLength + tilefonoMatch.index,
+						type: "tilefono",
+					});
+				}
+
+				// Look for phone number pattern (8+ digits followed by closing paren)
+				const phoneMatch = textAfterEpafi.match(phonePattern);
+				if (phoneMatch && phoneMatch.index !== undefined) {
+					stopMarkers.push({
+						index: epafiIndex + epafiLength + phoneMatch.index,
+						type: "phone",
+					});
+				}
+
+				// Check for "Κατάστημα" as a stop marker
+				const katastimaStopMatch =
+					textAfterEpafi.match(katastimaStopPattern);
+				if (
+					katastimaStopMatch &&
+					katastimaStopMatch.index !== undefined
+				) {
+					stopMarkers.push({
+						index:
+							epafiIndex + epafiLength + katastimaStopMatch.index,
+						type: "katastima",
+					});
+				}
+
+				// Use the earliest stop marker
+				if (stopMarkers.length > 0) {
+					stopMarkers.sort((a, b) => a.index - b.index);
+					endIndex = stopMarkers[0].index;
+
+					// Trim any trailing whitespace/newlines before the stop marker
 					while (
-						valueStart < text.length &&
-						/[\s]/.test(text[valueStart])
+						endIndex > valueStart &&
+						/[\s\n\r]/.test(text[endIndex - 1])
 					) {
-						valueStart++;
+						endIndex--;
 					}
-					const endIndex = startIndex + tilefonoMatch.index;
-					if (endIndex > valueStart) {
-						ypallilosTrapezas = text
-							.substring(valueStart, endIndex)
-							.trim();
-					}
+
+					// Debug logging
+					console.log(
+						"[extract] Υπάλληλος Τράπεζας - Stop markers found:",
+						stopMarkers
+					);
+					console.log(
+						"[extract] Using earliest stop marker at index:",
+						endIndex
+					);
+				}
+
+				if (endIndex > valueStart) {
+					// Extract the name (may span multiple lines)
+					let extracted = text.substring(valueStart, endIndex);
+					// Normalize whitespace: replace multiple newlines/spaces with single space
+					// but preserve the structure for multi-line names
+					extracted = extracted
+						.replace(/\r\n/g, "\n") // Normalize line endings
+						.replace(/\r/g, "\n")
+						.replace(/\n{3,}/g, "\n\n") // Max 2 consecutive newlines
+						.trim();
+					// Replace newlines with spaces for final output
+					ypallilosTrapezas = extracted
+						.replace(/\n/g, " ")
+						.replace(/\s+/g, " ")
+						.trim();
+
+					// Debug logging
+					console.log(
+						"[extract] Υπάλληλος Τράπεζας - Raw extracted:",
+						text.substring(valueStart, endIndex)
+					);
+					console.log(
+						"[extract] Υπάλληλος Τράπεζας - Final value:",
+						ypallilosTrapezas
+					);
+				} else {
+					console.log(
+						"[extract] Υπάλληλος Τράπεζας - No valid endIndex found. valueStart:",
+						valueStart,
+						"endIndex:",
+						endIndex
+					);
 				}
 			}
 
