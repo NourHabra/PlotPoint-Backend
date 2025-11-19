@@ -1207,7 +1207,7 @@ app.post("/api/uploads/image", uploadImage.single("file"), async (req, res) => {
 	}
 });
 
-// PDF extraction endpoint for extracting "Αρ. Εκτίμησης" value
+// PDF extraction endpoint for extracting multiple values from PDF
 app.post(
 	"/api/uploads/extract-pdf",
 	upload.single("file"),
@@ -1229,55 +1229,189 @@ app.post(
 			// Extract text from PDF
 			const text = pdfData.text;
 
-			// Find the value after "Αρ. Εκτίμησης"
-			// Look for the pattern "Αρ. Εκτίμησης" followed by the value (e.g., "2025/78217")
-			const searchText = "Αρ. Εκτίμησης";
-			const index = text.indexOf(searchText);
+			// Helper function to extract value between two markers
+			const extractBetween = (text, startMarker, endMarker) => {
+				const startIndex = text.indexOf(startMarker);
+				if (startIndex === -1) return null;
 
-			if (index === -1) {
+				let valueStart = startIndex + startMarker.length;
+				// Skip whitespace
+				while (
+					valueStart < text.length &&
+					/[\s]/.test(text[valueStart])
+				) {
+					valueStart++;
+				}
+
+				if (endMarker) {
+					const endIndex = text.indexOf(endMarker, valueStart);
+					if (endIndex === -1) return null;
+					return text.substring(valueStart, endIndex).trim();
+				} else {
+					// Extract until end of line or next non-matching character
+					let endIndex = valueStart;
+					while (
+						endIndex < text.length &&
+						text[endIndex] !== "\n" &&
+						text[endIndex] !== "\r"
+					) {
+						endIndex++;
+					}
+					return text.substring(valueStart, endIndex).trim();
+				}
+			};
+
+			// Helper function to extract value after a marker with pattern matching
+			const extractAfterPattern = (text, marker, pattern) => {
+				const index = text.indexOf(marker);
+				if (index === -1) return null;
+
+				let startIndex = index + marker.length;
+				// Skip whitespace and common separators
+				while (
+					startIndex < text.length &&
+					/[\s:]/g.test(text[startIndex])
+				) {
+					startIndex++;
+				}
+
+				// Extract matching pattern
+				let endIndex = startIndex;
+				while (endIndex < text.length && pattern.test(text[endIndex])) {
+					endIndex++;
+				}
+
+				const extracted = text.substring(startIndex, endIndex).trim();
+				// Clean up trailing non-matching characters
+				return extracted.replace(/[^0-9/\s\-A-Za-z.]+$/, "");
+			};
+
+			// 1. Extract "ΑΡ. ΕΚΤΙΜΗΣΗΣ" from "Εκτίμηση 2025 / 33118"
+			// Look for "Εκτίμηση" followed by the value pattern
+			let arEktimisis = null;
+			const ektimisiIndex = text.indexOf("Εκτίμηση");
+			if (ektimisiIndex !== -1) {
+				let startIndex = ektimisiIndex + "Εκτίμηση".length;
+				// Skip whitespace
+				while (
+					startIndex < text.length &&
+					/[\s]/.test(text[startIndex])
+				) {
+					startIndex++;
+				}
+				// Extract pattern: numbers, slashes, spaces (e.g., "2025 / 33118")
+				let endIndex = startIndex;
+				const arPattern = /[0-9/\s]/;
+				while (
+					endIndex < text.length &&
+					arPattern.test(text[endIndex])
+				) {
+					endIndex++;
+				}
+				arEktimisis = text.substring(startIndex, endIndex).trim();
+				// Clean up
+				arEktimisis = arEktimisis.replace(/[^0-9/\s]+$/, "").trim();
+			}
+
+			// 2. Extract "ΟΝΟΜΑ ΠΕΛΑΤΗ" from "Πελάτες 1 - P.T.P. PULSE MARKET RESEARCH LTD, 99696033"
+			// Look for "Πελάτες" followed by pattern until comma
+			let onomaPelati = null;
+			const pelatesIndex = text.indexOf("Πελάτες");
+			if (pelatesIndex !== -1) {
+				// Find the dash after "Πελάτες" (could be " - " or "-")
+				let dashIndex = text.indexOf(" - ", pelatesIndex);
+				if (dashIndex === -1) {
+					dashIndex = text.indexOf("-", pelatesIndex);
+				}
+
+				if (dashIndex !== -1) {
+					// Start after the dash (handle both " - " and "-")
+					let startIndex = dashIndex;
+					if (text.substring(dashIndex, dashIndex + 3) === " - ") {
+						startIndex = dashIndex + 3;
+					} else {
+						startIndex = dashIndex + 1;
+					}
+					// Skip whitespace
+					while (
+						startIndex < text.length &&
+						/[\s]/.test(text[startIndex])
+					) {
+						startIndex++;
+					}
+					// Extract until comma (which precedes the tax ID/number)
+					let endIndex = text.indexOf(",", startIndex);
+					if (endIndex === -1) {
+						// If no comma, try to find end by looking for 8+ digit pattern (tax ID)
+						const match = text
+							.substring(startIndex)
+							.match(/^(.+?)(?=\s+\d{8,})/);
+						if (match) {
+							endIndex = startIndex + match[1].length;
+						} else {
+							// Fallback: extract until newline
+							endIndex = text.indexOf("\n", startIndex);
+							if (endIndex === -1) endIndex = text.length;
+						}
+					}
+					if (endIndex > startIndex) {
+						onomaPelati = text
+							.substring(startIndex, endIndex)
+							.trim();
+					}
+				}
+			}
+
+			// 3. Extract "Υπάλληλος Τράπεζας" from "Επαφή Maria Kriticou Tηλέφωνο"
+			// Extract text between "Επαφή" and "Tηλέφωνο"
+			let ypallilosTrapezas = extractBetween(text, "Επαφή", "Tηλέφωνο");
+			if (!ypallilosTrapezas) {
+				// Try alternative: "Επαφή" and "Τηλέφωνο" (with capital Tau)
+				ypallilosTrapezas = extractBetween(text, "Επαφή", "Τηλέφωνο");
+			}
+
+			// 4. Extract "ΚΑΤΑΣΤΗΜΑ / ΥΠΗΡΕΣΙΑ ΤΡΑΠΕΖΑΣ" from "Κατάστημα ΚΑΤΩ ΛΑΚΑΤΑΜΙΑ (Τηλ. 22126555)"
+			// Look for "Κατάστημα" followed by text until opening parenthesis
+			let katastima = null;
+			const katastimaIndex = text.indexOf("Κατάστημα");
+			if (katastimaIndex !== -1) {
+				let startIndex = katastimaIndex + "Κατάστημα".length;
+				// Skip whitespace
+				while (
+					startIndex < text.length &&
+					/[\s]/.test(text[startIndex])
+				) {
+					startIndex++;
+				}
+				// Extract until opening parenthesis
+				let endIndex = text.indexOf("(", startIndex);
+				if (endIndex === -1) {
+					// If no parenthesis, extract until end of line
+					endIndex = text.indexOf("\n", startIndex);
+					if (endIndex === -1) endIndex = text.length;
+				}
+				if (endIndex > startIndex) {
+					katastima = text.substring(startIndex, endIndex).trim();
+				}
+			}
+
+			// Prepare result object
+			const extractedValues = {};
+			if (arEktimisis) extractedValues["ΑΡ. ΕΚΤΙΜΗΣΗΣ"] = arEktimisis;
+			if (onomaPelati) extractedValues["ΟΝΟΜΑ ΠΕΛΑΤΗ"] = onomaPelati;
+			if (ypallilosTrapezas)
+				extractedValues["Υπάλληλος Τράπεζας"] = ypallilosTrapezas;
+			if (katastima)
+				extractedValues["ΚΑΤΑΣΤΗΜΑ / ΥΠΗΡΕΣΙΑ ΤΡΑΠΕΖΑΣ"] = katastima;
+
+			// Check if at least one value was extracted
+			if (Object.keys(extractedValues).length === 0) {
 				// Clean up uploaded file
 				try {
 					fs.unlinkSync(req.file.path);
 				} catch (_) {}
 				return res.status(404).json({
-					message: `Could not find "${searchText}" in the PDF`,
-				});
-			}
-
-			// Extract the value after the search text
-			// Skip the search text and any whitespace/newlines
-			let startIndex = index + searchText.length;
-			// Skip whitespace and common separators
-			while (
-				startIndex < text.length &&
-				/[\s:]/g.test(text[startIndex])
-			) {
-				startIndex++;
-			}
-
-			// Extract the value (format like "2025/78217" or similar)
-			// Match numbers, slashes, dashes, and word characters that form a reference number
-			let endIndex = startIndex;
-			const valuePattern = /[0-9/\-A-Za-z]/;
-			while (
-				endIndex < text.length &&
-				valuePattern.test(text[endIndex])
-			) {
-				endIndex++;
-			}
-
-			let extractedValue = text.substring(startIndex, endIndex).trim();
-
-			// Clean up: remove any trailing non-alphanumeric characters except slash
-			extractedValue = extractedValue.replace(/[^0-9/\-A-Za-z]+$/, "");
-
-			if (!extractedValue) {
-				// Clean up uploaded file
-				try {
-					fs.unlinkSync(req.file.path);
-				} catch (_) {}
-				return res.status(404).json({
-					message: `Found "${searchText}" but could not extract the value after it`,
+					message: "Could not extract any values from the PDF",
 				});
 			}
 
@@ -1287,8 +1421,7 @@ app.post(
 			} catch (_) {}
 
 			return res.status(200).json({
-				extractedValue: extractedValue,
-				searchText: searchText,
+				extractedValues: extractedValues,
 			});
 		} catch (error) {
 			// Clean up uploaded file on error
