@@ -1229,12 +1229,78 @@ app.post(
 			// Extract text from PDF
 			const text = pdfData.text;
 
-			// Helper function to extract value between two markers
-			const extractBetween = (text, startMarker, endMarker) => {
-				const startIndex = text.indexOf(startMarker);
-				if (startIndex === -1) return null;
+			// Helper function to create a regex pattern that matches Greek text with any accent variations
+			const createAccentInsensitivePattern = (baseText) => {
+				// Map each character (including accented variants) to a character class that includes all its accent variations
+				const accentMap = {
+					// Alpha
+					α: "[αά]",
+					ά: "[αά]",
+					Α: "[ΑΆ]",
+					Ά: "[ΑΆ]",
+					// Epsilon
+					ε: "[εέ]",
+					έ: "[εέ]",
+					Ε: "[ΕΈ]",
+					Έ: "[ΕΈ]",
+					// Eta
+					η: "[ηή]",
+					ή: "[ηή]",
+					Η: "[ΗΉ]",
+					Ή: "[ΗΉ]",
+					// Iota
+					ι: "[ιίϊΐ]",
+					ί: "[ιίϊΐ]",
+					ϊ: "[ιίϊΐ]",
+					ΐ: "[ιίϊΐ]",
+					Ι: "[ΙΊΪ]",
+					Ί: "[ΙΊΪ]",
+					Ϊ: "[ΙΊΪ]",
+					// Omicron
+					ο: "[οό]",
+					ό: "[οό]",
+					Ο: "[ΟΌ]",
+					Ό: "[ΟΌ]",
+					// Upsilon
+					υ: "[υύϋΰ]",
+					ύ: "[υύϋΰ]",
+					ϋ: "[υύϋΰ]",
+					ΰ: "[υύϋΰ]",
+					Υ: "[ΥΎΫ]",
+					Ύ: "[ΥΎΫ]",
+					Ϋ: "[ΥΎΫ]",
+					// Omega
+					ω: "[ωώ]",
+					ώ: "[ωώ]",
+					Ω: "[ΩΏ]",
+					Ώ: "[ΩΏ]",
+				};
 
-				let valueStart = startIndex + startMarker.length;
+				let pattern = "";
+				for (let i = 0; i < baseText.length; i++) {
+					const char = baseText[i];
+					if (accentMap[char]) {
+						pattern += accentMap[char];
+					} else {
+						// Escape special regex characters
+						pattern += char.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+					}
+				}
+				return new RegExp(pattern, "i");
+			};
+
+			// Helper function to extract value between two markers (handles accent variations)
+			const extractBetween = (text, startMarker, endMarker) => {
+				// Use accent-insensitive pattern for start marker
+				const startPattern =
+					createAccentInsensitivePattern(startMarker);
+				const startMatch = text.match(startPattern);
+				if (!startMatch || startMatch.index === undefined) return null;
+
+				const startIndex = startMatch.index;
+				const startLength = startMatch[0].length;
+				let valueStart = startIndex + startLength;
+
 				// Skip whitespace
 				while (
 					valueStart < text.length &&
@@ -1244,8 +1310,13 @@ app.post(
 				}
 
 				if (endMarker) {
-					const endIndex = text.indexOf(endMarker, valueStart);
-					if (endIndex === -1) return null;
+					// Use accent-insensitive pattern for end marker
+					const endPattern =
+						createAccentInsensitivePattern(endMarker);
+					const textAfterStart = text.substring(valueStart);
+					const endMatch = textAfterStart.match(endPattern);
+					if (!endMatch || endMatch.index === undefined) return null;
+					const endIndex = valueStart + endMatch.index;
 					return text.substring(valueStart, endIndex).trim();
 				} else {
 					// Extract until end of line or next non-matching character
@@ -1286,12 +1357,30 @@ app.post(
 				return extracted.replace(/[^0-9/\s\-A-Za-z.]+$/, "");
 			};
 
-			// 1. Extract "ΑΡ. ΕΚΤΙΜΗΣΗΣ" from "Εκτίμηση 2025 / 33118"
-			// Look for "Εκτίμηση" followed by the value pattern
+			// 1. Extract "ΑΡ. ΕΚΤΙΜΗΣΗΣ" from "Εκτίμηση 2025 / 33118" or "Εκτιμήση 2025 / 63183"
+			// Look for "Εκτίμηση" or "Εκτιμήση" (handles all accent variations)
 			let arEktimisis = null;
-			const ektimisiIndex = text.indexOf("Εκτίμηση");
+
+			// Create regex patterns that match "Εκτίμηση" with any accent variations
+			// Try both base forms to ensure we catch all variations
+			const ektimisiPattern1 = createAccentInsensitivePattern("Εκτίμηση");
+			const ektimisiPattern2 = createAccentInsensitivePattern("Εκτιμήση");
+
+			let ektimisiMatch = text.match(ektimisiPattern1);
+			if (!ektimisiMatch) {
+				ektimisiMatch = text.match(ektimisiPattern2);
+			}
+
+			let ektimisiIndex = -1;
+			let ektimisiLength = 0;
+
+			if (ektimisiMatch && ektimisiMatch.index !== undefined) {
+				ektimisiIndex = ektimisiMatch.index;
+				ektimisiLength = ektimisiMatch[0].length;
+			}
+
 			if (ektimisiIndex !== -1) {
-				let startIndex = ektimisiIndex + "Εκτίμηση".length;
+				let startIndex = ektimisiIndex + ektimisiLength;
 				// Skip whitespace
 				while (
 					startIndex < text.length &&
@@ -1314,17 +1403,23 @@ app.post(
 			}
 
 			// 2. Extract "ΟΝΟΜΑ ΠΕΛΑΤΗ" from "Πελάτες 1 - P.T.P. PULSE MARKET RESEARCH LTD, 99696033"
-			// Look for "Πελάτες" followed by pattern until comma
+			// Look for "Πελάτες" (handles accent variations) followed by pattern until comma
 			let onomaPelati = null;
-			const pelatesIndex = text.indexOf("Πελάτες");
-			if (pelatesIndex !== -1) {
+			const pelatesPattern = createAccentInsensitivePattern("Πελάτες");
+			const pelatesMatch = text.match(pelatesPattern);
+			if (pelatesMatch && pelatesMatch.index !== undefined) {
+				const pelatesIndex = pelatesMatch.index;
+				const pelatesLength = pelatesMatch[0].length;
 				// Find the dash after "Πελάτες" (could be " - " or "-")
-				let dashIndex = text.indexOf(" - ", pelatesIndex);
+				const textAfterPelates = text.substring(
+					pelatesIndex + pelatesLength
+				);
+				let dashIndex = textAfterPelates.indexOf(" - ");
 				if (dashIndex === -1) {
-					dashIndex = text.indexOf("-", pelatesIndex);
+					dashIndex = textAfterPelates.indexOf("-");
 				}
-
 				if (dashIndex !== -1) {
+					dashIndex = pelatesIndex + pelatesLength + dashIndex;
 					// Start after the dash (handle both " - " and "-")
 					let startIndex = dashIndex;
 					if (text.substring(dashIndex, dashIndex + 3) === " - ") {
@@ -1363,19 +1458,62 @@ app.post(
 			}
 
 			// 3. Extract "Υπάλληλος Τράπεζας" from "Επαφή Maria Kriticou Tηλέφωνο"
-			// Extract text between "Επαφή" and "Tηλέφωνο"
-			let ypallilosTrapezas = extractBetween(text, "Επαφή", "Tηλέφωνο");
-			if (!ypallilosTrapezas) {
-				// Try alternative: "Επαφή" and "Τηλέφωνο" (with capital Tau)
-				ypallilosTrapezas = extractBetween(text, "Επαφή", "Τηλέφωνο");
+			// Extract text between "Επαφή" and "Tηλέφωνο" (handles accent variations and T vs Τ)
+			let ypallilosTrapezas = null;
+
+			// Create accent-insensitive patterns for "Επαφή" and "Τηλέφωνο"
+			const epafiPattern = createAccentInsensitivePattern("Επαφή");
+			// Create pattern that handles both Latin T and Greek Tau (Τ)
+			// Build pattern manually to handle T/Τ variation
+			const tilefonoBase = "ηλέφωνο";
+			const tilefonoAccentPattern =
+				createAccentInsensitivePattern(tilefonoBase);
+			// Create pattern: [TΤ] + accent-insensitive pattern for the rest
+			const tilefonoPattern = new RegExp(
+				"[TΤ]" + tilefonoAccentPattern.source,
+				"i"
+			);
+
+			const epafiMatch = text.match(epafiPattern);
+			if (epafiMatch && epafiMatch.index !== undefined) {
+				const epafiIndex = epafiMatch.index;
+				const epafiLength = epafiMatch[0].length;
+
+				// Search for "Τηλέφωνο" or "Tηλέφωνο" after "Επαφή"
+				const textAfterEpafi = text.substring(epafiIndex + epafiLength);
+				const tilefonoMatch = textAfterEpafi.match(tilefonoPattern);
+
+				if (tilefonoMatch && tilefonoMatch.index !== undefined) {
+					const startIndex = epafiIndex + epafiLength;
+					// Skip whitespace
+					let valueStart = startIndex;
+					while (
+						valueStart < text.length &&
+						/[\s]/.test(text[valueStart])
+					) {
+						valueStart++;
+					}
+					const endIndex = startIndex + tilefonoMatch.index;
+					if (endIndex > valueStart) {
+						ypallilosTrapezas = text
+							.substring(valueStart, endIndex)
+							.trim();
+					}
+				}
 			}
 
 			// 4. Extract "ΚΑΤΑΣΤΗΜΑ / ΥΠΗΡΕΣΙΑ ΤΡΑΠΕΖΑΣ" from "Κατάστημα ΚΑΤΩ ΛΑΚΑΤΑΜΙΑ (Τηλ. 22126555)"
-			// Look for "Κατάστημα" followed by text until opening parenthesis
+			// Look for "Κατάστημα" (handles accent variations) followed by text until opening parenthesis
 			let katastima = null;
-			const katastimaIndex = text.indexOf("Κατάστημα");
-			if (katastimaIndex !== -1) {
-				let startIndex = katastimaIndex + "Κατάστημα".length;
+
+			const katastimaPattern =
+				createAccentInsensitivePattern("Κατάστημα");
+			const katastimaMatch = text.match(katastimaPattern);
+
+			if (katastimaMatch && katastimaMatch.index !== undefined) {
+				const katastimaIndex = katastimaMatch.index;
+				const katastimaLength = katastimaMatch[0].length;
+				let startIndex = katastimaIndex + katastimaLength;
 				// Skip whitespace
 				while (
 					startIndex < text.length &&
