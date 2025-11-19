@@ -3658,6 +3658,35 @@ app.patch("/api/templates/:id/reactivate", async (req, res) => {
 	}
 });
 
+// Proxy endpoint for GeneralParcelIdentify (to avoid CORS issues)
+app.get("/api/parcel-info", async (req, res) => {
+	try {
+		const { subPropertyId } = req.query;
+		if (!subPropertyId) {
+			return res
+				.status(400)
+				.json({ message: "subPropertyId is required" });
+		}
+
+		const url = `https://eservices.dls.moi.gov.cy/Services/Rest/Info/GeneralParcelIdentify?subPropertyId=${subPropertyId}`;
+		const response = await fetch(url);
+
+		if (!response.ok) {
+			return res.status(response.status).json({
+				message: `HTTP error! status: ${response.status}`,
+			});
+		}
+
+		const data = await response.json();
+		return res.json(data);
+	} catch (error) {
+		console.error("Error fetching parcel info:", error);
+		return res.status(500).json({
+			message: error.message || "Failed to fetch parcel info",
+		});
+	}
+});
+
 // Start server
 const server = app.listen(PORT, () => {
 	console.log(`Server is running on port ${PORT}`);
