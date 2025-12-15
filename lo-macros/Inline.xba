@@ -1,0 +1,207 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE script:module PUBLIC "-//OpenOffice.org//DTD OfficeDocument 1.0//EN" "module.dtd">
+<script:module xmlns:script="http://openoffice.org/2000/script" script:name="Inline" script:language="StarBasic" script:moduleType="normal">Option Explicit
+
+&apos;====================================================================
+&apos; InsertPhotosByPlaceholders_FitToPage
+&apos; Replaces multiple placeholders (first occurrence each) with images,
+&apos; in a single DOCX open/save/close cycle.
+&apos;
+&apos; ARG 1: docPathOrURL
+&apos; ARG 2: mappingPipeSeparated  -&gt;  &quot;placeholder::img|placeholder2::img2|...&quot;
+&apos;
+&apos; - Images are inserted AS_CHARACTER, scaled to usable page width.
+&apos; - No page breaks are added.
+&apos; - Search is case-insensitive by default; adjust below if needed.
+&apos;====================================================================
+Public Sub InsertPhotosByPlaceholders_FitToPage(docPathOrURL As String, mappingPipeSeparated As String)
+    On Local Error GoTo HandleError
+
+    Dim sDocURL As String
+    sDocURL = EnsureURL(docPathOrURL)
+
+    If Trim$(mappingPipeSeparated) = &quot;&quot; Then
+        &apos; Nothing to do
+        Exit Sub
+    End If
+
+    Dim oDesktop As Object, oDoc As Object
+    oDesktop = createUnoService(&quot;com.sun.star.frame.Desktop&quot;)
+
+    oDoc = oDesktop.loadComponentFromURL(sDocURL, &quot;_blank&quot;, 0, Array())
+    If IsNull(oDoc) Then
+        MsgBox &quot;Cannot open document: &quot; &amp; sDocURL, 16, &quot;InsertPhotosByPlaceholders_FitToPage&quot;
+        Exit Sub
+    End If
+
+    &apos; Speed up: lock UI/reflow; guard XActionLockable
+    oDoc.lockControllers
+    If HasUnoInterfaces(oDoc, &quot;com.sun.star.document.XActionLockable&quot;) Then
+        oDoc.addActionLock
+    End If
+
+    Dim pairs() As String
+    pairs = Split(mappingPipeSeparated, &quot;|&quot;)
+
+    Dim i As Long
+    For i = LBound(pairs) To UBound(pairs)
+        Dim pair As String
+        pair = Trim$(pairs(i))
+        If pair &lt;&gt; &quot;&quot; Then
+            Dim placeholder As String, imgSpec As String
+            If SplitPair(pair, &quot;::&quot;, placeholder, imgSpec) Then
+                ReplaceFirstPlaceholderWithImage oDoc, placeholder, imgSpec
+            End If
+        End If
+    Next i
+
+    &apos; Save and close
+    Dim storeArgs(0) As New com.sun.star.beans.PropertyValue
+    storeArgs(0).Name  = &quot;FilterName&quot;
+    storeArgs(0).Value = &quot;Office Open XML Text&quot;
+    oDoc.storeToURL sDocURL, storeArgs
+
+Cleanup:
+    On Local Error Resume Next
+    If HasUnoInterfaces(oDoc, &quot;com.sun.star.document.XActionLockable&quot;) Then
+        oDoc.removeActionLock
+    End If
+    oDoc.unlockControllers
+    oDoc.close(True)
+    Exit Sub
+
+HandleError:
+    MsgBox &quot;InsertPhotosByPlaceholders_FitToPage error: &quot; &amp; Err &amp; &quot; - &quot; &amp; Error$, 16, &quot;InsertPhotosByPlaceholders_FitToPage&quot;
+    Resume Cleanup
+End Sub
+
+&apos;---------------------------------------------------------
+&apos; Replace first occurrence of a placeholder with an image
+&apos;---------------------------------------------------------
+Private Sub ReplaceFirstPlaceholderWithImage(oDoc As Object, ByVal sPlaceholder As String, ByVal imgPathOrURL As String)
+    On Local Error GoTo HandleError
+
+    Dim oText As Object: Set oText = oDoc.getText()
+
+    &apos; Find the placeholder (first occurrence)
+    Dim oSearchDesc As Object
+    oSearchDesc = oDoc.createSearchDescriptor()
+    oSearchDesc.SearchString = sPlaceholder
+    oSearchDesc.SearchCaseSensitive = False  &apos; &lt;- set True if you need case-sensitive matches
+    Dim oFound As Object
+    oFound = oDoc.findFirst(oSearchDesc)
+    If IsNull(oFound) Then
+        &apos; Not found: skip silently
+        Exit Sub
+    End If
+
+    &apos; Cursor at found range; clear the placeholder text
+    Dim oCursor As Object
+    oCursor = oText.createTextCursorByRange(oFound)
+    oCursor.String = &quot;&quot;
+
+    &apos; Create/insert image
+    Dim sImageURL As String
+    sImageURL = EnsureURL(imgPathOrURL)
+
+    Dim oGraphic As Object
+    oGraphic = oDoc.createInstance(&quot;com.sun.star.text.GraphicObject&quot;)
+    oGraphic.GraphicURL = sImageURL
+    oGraphic.AnchorType = com.sun.star.text.TextContentAnchorType.AS_CHARACTER
+
+    oText.insertTextContent oCursor, oGraphic, False
+
+    &apos; Fit to usable page width at the cursor&apos;s page
+    FitGraphicToUsablePage oDoc, oCursor, oGraphic
+
+    Exit Sub
+
+HandleError:
+    &apos; Skip this pair on error, continue with others
+    &apos; (You could log via Print if desired)
+End Sub
+
+&apos;---------------------------------------------------------
+&apos; Compute usable page area AT the cursor&apos;s page and size
+&apos; the graphic to fill width while preserving aspect ratio.
+&apos;---------------------------------------------------------
+Private Sub FitGraphicToUsablePage(oDoc As Object, oCursor As Object, oGraphic As Object)
+    On Local Error GoTo HandleError
+
+    Dim oViewCursor As Object
+    oViewCursor = oDoc.CurrentController.getViewCursor()
+    oViewCursor.gotoRange oCursor, False
+
+    Dim oPageStyles As Object, oPageStyle As Object
+    Dim sPageStyleName As String
+    sPageStyleName = oViewCursor.PageStyleName
+
+    oPageStyles = oDoc.getStyleFamilies().getByName(&quot;PageStyles&quot;)
+    oPageStyle  = oPageStyles.getByName(sPageStyleName)
+
+    Dim nUsableWidth As Long, nUsableHeight As Long
+    nUsableWidth  = oPageStyle.Width  - oPageStyle.LeftMargin - oPageStyle.RightMargin
+    nUsableHeight = oPageStyle.Height - oPageStyle.TopMargin  - oPageStyle.BottomMargin
+
+    Dim oOriginalSize As Object
+    oOriginalSize = oGraphic.ActualSize   &apos; 1/100 mm
+
+    Dim curW As Long, curH As Long
+    curW = oOriginalSize.Width
+    curH = oOriginalSize.Height
+
+    If nUsableWidth &gt; 0 And nUsableHeight &gt; 0 And curW &gt; 0 And curH &gt; 0 Then
+        Dim scale As Double
+        Dim newW As Long, newH As Long
+        scale = nUsableWidth / curW
+        newW = nUsableWidth
+        newH = CLng(curH * scale)
+
+        If newH &gt; nUsableHeight Then
+            scale = nUsableHeight / curH
+            newH = nUsableHeight
+            newW = CLng(curW * scale)
+        End If
+
+        Dim oSize As New com.sun.star.awt.Size
+        oSize.Width  = newW
+        oSize.Height = newH
+        oGraphic.Size = oSize
+    End If
+
+    Exit Sub
+
+HandleError:
+    &apos; Ignore sizing errors; image remains inserted
+End Sub
+
+&apos;---------------------------------------------------------
+&apos; Split &quot;placeholder::image&quot; into two parts; returns True if OK
+&apos;---------------------------------------------------------
+Private Function SplitPair(ByVal s As String, ByVal sep As String, ByRef leftPart As String, ByRef rightPart As String) As Boolean
+    Dim pos As Long
+    pos = InStr(1, s, sep, 0)  &apos; 0 = binary compare (case-sensitive); use 1 for text compare if ever needed
+    If pos &lt;= 0 Then
+        SplitPair = False
+        Exit Function
+    End If
+    leftPart  = Trim$(Left$(s, pos - 1))
+    rightPart = Trim$(Mid$(s, pos + Len(sep)))
+    SplitPair = (leftPart &lt;&gt; &quot;&quot; And rightPart &lt;&gt; &quot;&quot;)
+End Function
+
+
+&apos;---------------------------------------------------------
+&apos; Convert a filesystem path to a file URL if needed
+&apos;---------------------------------------------------------
+Private Function EnsureURL(pathOrURL As String) As String
+    Dim s As String
+    s = LCase$(Left$(Trim$(pathOrURL), 8))
+    If Left$(s, 7) = &quot;file://&quot; Or s = &quot;vnd.sun:&quot; Then
+        EnsureURL = pathOrURL
+    Else
+        EnsureURL = ConvertToURL(pathOrURL)
+    End If
+End Function
+
+</script:module>

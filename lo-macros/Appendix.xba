@@ -1,0 +1,157 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE script:module PUBLIC "-//OpenOffice.org//DTD OfficeDocument 1.0//EN" "module.dtd">
+<script:module xmlns:script="http://openoffice.org/2000/script" script:name="Appendix" script:language="StarBasic" script:moduleType="normal">Option Explicit
+
+&apos;=========================================================
+&apos; Append one or more images to the end of a single DOCX,
+&apos; fitting to usable page width while preserving aspect ratio.
+&apos;
+&apos; Usage (two arguments):
+&apos;   1) docPathOrURL            -&gt; a filesystem path or file URL to the .docx
+&apos;   2) imagesPipeSeparated     -&gt; one or more paths/URLs separated by &quot;|&quot;
+&apos;
+&apos; Example for imagesPipeSeparated:
+&apos;   &quot;C:\pics\1.png|C:\pics\2.jpg|C:\pics\3.jpeg&quot;
+&apos;=========================================================
+Public Sub InsertPhotos_FitToPage(docPathOrURL As String, imagesPipeSeparated As String)
+    On Local Error GoTo HandleError
+
+    Dim sDocURL As String
+    sDocURL = EnsureURL(docPathOrURL)
+
+    If Trim$(imagesPipeSeparated) = &quot;&quot; Then
+        MsgBox &quot;No images provided.&quot;, 48, &quot;InsertPhotos_FitToPage&quot;
+        Exit Sub
+    End If
+
+    Dim oDesktop As Object
+    oDesktop = createUnoService(&quot;com.sun.star.frame.Desktop&quot;)
+
+    Dim oDoc As Object
+    oDoc = oDesktop.loadComponentFromURL(sDocURL, &quot;_blank&quot;, 0, Array())
+    If IsNull(oDoc) Then
+        MsgBox &quot;Cannot open document: &quot; &amp; sDocURL, 16, &quot;InsertPhotos_FitToPage&quot;
+        Exit Sub
+    End If
+
+    &apos; === Speed up by locking the UI/reflow ===
+    oDoc.lockControllers
+    If HasUnoInterfaces(oDoc, &quot;com.sun.star.document.XActionLockable&quot;) Then
+        oDoc.addActionLock
+    End If
+
+    Dim oText As Object, oCursor As Object
+    Set oText = oDoc.getText()
+    Set oCursor = oText.createTextCursor()
+    oCursor.gotoEnd(False)
+
+    &apos; === Compute usable page area once (1/100 mm) ===
+    Dim nUsableWidth As Long, nUsableHeight As Long
+    GetUsablePageArea oDoc, nUsableWidth, nUsableHeight
+
+    &apos; === Split the image list ===
+    Dim arr() As String
+    arr = Split(imagesPipeSeparated, &quot;|&quot;)
+
+    Dim i As Long
+    For i = LBound(arr) To UBound(arr)
+        Dim imgSpec As String
+        imgSpec = Trim$(arr(i))
+        If imgSpec &lt;&gt; &quot;&quot; Then
+            Dim sImageURL As String
+            sImageURL = EnsureURL(imgSpec)
+
+            &apos; --- Create and insert image ---
+            Dim oGraphic As Object
+            oGraphic = oDoc.createInstance(&quot;com.sun.star.text.GraphicObject&quot;)
+            oGraphic.GraphicURL = sImageURL
+            oGraphic.AnchorType = com.sun.star.text.TextContentAnchorType.AS_CHARACTER
+
+            &apos; Insert at native size first
+            oText.insertTextContent oCursor, oGraphic, False
+
+            &apos; --- Fit proportionally to usable page area ---
+            Dim oOriginalSize As Object
+            oOriginalSize = oGraphic.ActualSize &apos; original bitmap size (1/100 mm)
+
+            Dim curW As Long, curH As Long
+            curW = oOriginalSize.Width
+            curH = oOriginalSize.Height
+
+            If nUsableWidth &gt; 0 And nUsableHeight &gt; 0 And curW &gt; 0 And curH &gt; 0 Then
+                Dim scale As Double, newW As Long, newH As Long
+                scale = nUsableWidth / curW
+                newW = nUsableWidth
+                newH = CLng(curH * scale)
+
+                &apos; Cap by page height if needed
+                If newH &gt; nUsableHeight Then
+                    scale = nUsableHeight / curH
+                    newH = nUsableHeight
+                    newW = CLng(curW * scale)
+                End If
+
+                Dim oSize As New com.sun.star.awt.Size
+                oSize.Width = newW
+                oSize.Height = newH
+                oGraphic.Size = oSize
+            End If
+
+            &apos; --- Add page break ONLY if not the last image ---
+            If i &lt; UBound(arr) Then
+                oText.insertControlCharacter oCursor, com.sun.star.text.ControlCharacter.PARAGRAPH_BREAK, False
+                oCursor.BreakType = com.sun.star.style.BreakType.PAGE_BEFORE
+                oText.insertControlCharacter oCursor, com.sun.star.text.ControlCharacter.PARAGRAPH_BREAK, False
+            End If
+        End If
+    Next i
+
+    &apos; === Save and close ===
+    Dim storeArgs(0) As New com.sun.star.beans.PropertyValue
+    storeArgs(0).Name  = &quot;FilterName&quot;
+    storeArgs(0).Value = &quot;Office Open XML Text&quot;
+    oDoc.storeToURL sDocURL, storeArgs
+
+Cleanup:
+    On Local Error Resume Next
+    If HasUnoInterfaces(oDoc, &quot;com.sun.star.document.XActionLockable&quot;) Then
+        oDoc.removeActionLock
+    End If
+    oDoc.unlockControllers
+    oDoc.close(True)
+    Exit Sub
+
+HandleError:
+    MsgBox &quot;InsertPhotos_FitToPage error: &quot; &amp; Err &amp; &quot; - &quot; &amp; Error$, 16, &quot;InsertPhotos_FitToPage&quot;
+    Resume Cleanup
+End Sub
+
+&apos;---------------------------------------------------------
+&apos; Compute usable page width/height for current page style
+&apos;---------------------------------------------------------
+Private Sub GetUsablePageArea(oDoc As Object, ByRef nUsableWidth As Long, ByRef nUsableHeight As Long)
+    Dim sPageStyleName As String
+    sPageStyleName = oDoc.CurrentController.getViewCursor().PageStyleName
+
+    Dim oPageStyles As Object, oPageStyle As Object
+    oPageStyles = oDoc.getStyleFamilies().getByName(&quot;PageStyles&quot;)
+    oPageStyle = oPageStyles.getByName(sPageStyleName)
+
+    nUsableWidth  = oPageStyle.Width  - oPageStyle.LeftMargin - oPageStyle.RightMargin
+    nUsableHeight = oPageStyle.Height - oPageStyle.TopMargin  - oPageStyle.BottomMargin
+End Sub
+
+&apos;---------------------------------------------------------
+&apos; Convert a filesystem path to a file URL if needed
+&apos;---------------------------------------------------------
+Private Function EnsureURL(pathOrURL As String) As String
+    Dim s As String
+    s = LCase$(Left$(Trim$(pathOrURL), 8))
+    If Left$(s, 7) = &quot;file://&quot; Or s = &quot;vnd.sun:&quot; Then
+        EnsureURL = pathOrURL
+    Else
+        EnsureURL = ConvertToURL(pathOrURL)
+    End If
+End Function
+
+</script:module>
