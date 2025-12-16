@@ -86,7 +86,19 @@ mongoose
 			useUnifiedTopology: true,
 		}
 	)
-	.then(() => console.log("Connected to MongoDB"))
+	.then(async () => {
+		console.log("Connected to MongoDB");
+		// Fetch and display public IP address
+		try {
+			const ipResponse = await fetch("https://api.ipify.org?format=json");
+			if (ipResponse.ok) {
+				const ipData = await ipResponse.json();
+				console.log(`Server Public IP Address: ${ipData.ip}`);
+			}
+		} catch (err) {
+			console.log("Could not fetch public IP address");
+		}
+	})
 	.catch((err) => console.error("MongoDB connection error:", err));
 
 // Import Template model
@@ -3550,6 +3562,267 @@ app.patch("/api/templates/:id/reactivate", async (req, res) => {
 		res.json({ message: "Template reactivated successfully", template });
 	} catch (error) {
 		res.status(500).json({ message: error.message });
+	}
+});
+
+// Cadastral/ArcGIS API Proxy Endpoints
+// Get regions (municipalities) for a province
+app.get("/api/cadastral/provinces/:provinceCode/regions", async (req, res) => {
+	try {
+		const { provinceCode } = req.params;
+		// Extract the numeric part from the province code (e.g., "3D1" -> "1", "3D3" -> "3")
+		const distCode = provinceCode.replace(/^3D/, "");
+		const apiUrl = `https://eservices.dls.moi.gov.cy/arcgis/rest/services/National/General_Search/MapServer/11/query?f=json&outFields=VIL_CODE,DIST_CODE,VIL_NM_G&returnDistinctValues=false&returnGeometry=false&where=DIST_CODE%3D${distCode}`;
+
+		const response = await fetch(apiUrl);
+		if (!response.ok) {
+			throw new Error(`ArcGIS API error! status: ${response.status}`);
+		}
+
+		const data = await response.json();
+		if (data.features && Array.isArray(data.features)) {
+			const regions = data.features.map((feature) => ({
+				vilCode: feature.attributes.VIL_CODE,
+				distCode: feature.attributes.DIST_CODE,
+				name: feature.attributes.VIL_NM_G,
+			}));
+			// Sort by name for better UX
+			regions.sort((a, b) => a.name.localeCompare(b.name, "el"));
+			return res.json({ regions });
+		}
+		return res.json({ regions: [] });
+	} catch (error) {
+		console.error("Error fetching regions:", error);
+		return res
+			.status(500)
+			.json({ message: error.message || "Failed to fetch regions" });
+	}
+});
+
+// Get QRTR_CODE for a region
+app.get(
+	"/api/cadastral/regions/:distCode/:vilCode/qrtr-code",
+	async (req, res) => {
+		try {
+			const { distCode, vilCode } = req.params;
+			const apiUrl = `https://eservices.dls.moi.gov.cy/arcgis/rest/services/National/General_Search/MapServer/10/query?f=json&outFields=QRTR_CODE,VIL_CODE,DIST_CODE,QRTR_NM_G&returnDistinctValues=false&returnGeometry=false&where=DIST_CODE%3D${distCode}+and+VIL_CODE%3D${vilCode}`;
+
+			const response = await fetch(apiUrl);
+			if (!response.ok) {
+				throw new Error(`ArcGIS API error! status: ${response.status}`);
+			}
+
+			const data = await response.json();
+			if (
+				data.features &&
+				Array.isArray(data.features) &&
+				data.features.length > 0
+			) {
+				const qrtrCode = data.features[0].attributes?.QRTR_CODE;
+				return res.json({ qrtrCode });
+			}
+			return res.json({ qrtrCode: null });
+		} catch (error) {
+			console.error("Error fetching QRTR_CODE:", error);
+			return res.status(500).json({
+				message: error.message || "Failed to fetch QRTR_CODE",
+			});
+		}
+	}
+);
+
+// Get sheets for a region
+app.get("/api/cadastral/sheets", async (req, res) => {
+	try {
+		const { distCode, vilCode, qrtrCode } = req.query;
+		if (!distCode || !vilCode || qrtrCode === undefined) {
+			return res.status(400).json({
+				message:
+					"Missing required parameters: distCode, vilCode, qrtrCode",
+			});
+		}
+
+		const apiUrl = `https://eservices.dls.moi.gov.cy/arcgis/rest/services/National/General_Search/MapServer/0/query?f=json&outFields=SHEET,SHEET,DIST_CODE,VIL_CODE,QRTR_CODE&returnDistinctValues=true&returnGeometry=false&where=DIST_CODE%3D${distCode}+and+VIL_CODE%3D${vilCode}+and+QRTR_CODE%3D${qrtrCode}`;
+
+		const response = await fetch(apiUrl);
+		if (!response.ok) {
+			throw new Error(`ArcGIS API error! status: ${response.status}`);
+		}
+
+		const data = await response.json();
+		if (data.features && Array.isArray(data.features)) {
+			const sheets = new Set();
+			data.features.forEach((feature) => {
+				const sheet = feature.attributes?.SHEET;
+				if (sheet !== undefined && sheet !== null && sheet !== "") {
+					sheets.add(String(sheet));
+				}
+			});
+
+			// Convert to array and sort
+			const sheetArray = Array.from(sheets).sort((a, b) => {
+				const numA = Number(a);
+				const numB = Number(b);
+				if (!isNaN(numA) && !isNaN(numB)) {
+					return numA - numB;
+				}
+				return String(a).localeCompare(String(b));
+			});
+
+			return res.json({ sheets: sheetArray });
+		}
+		return res.json({ sheets: [] });
+	} catch (error) {
+		console.error("Error fetching sheets:", error);
+		return res
+			.status(500)
+			.json({ message: error.message || "Failed to fetch sheets" });
+	}
+});
+
+// Get plans for a sheet
+app.get("/api/cadastral/plans", async (req, res) => {
+	try {
+		const { distCode, vilCode, qrtrCode, sheet } = req.query;
+		if (!distCode || !vilCode || qrtrCode === undefined || !sheet) {
+			return res.status(400).json({
+				message:
+					"Missing required parameters: distCode, vilCode, qrtrCode, sheet",
+			});
+		}
+
+		const apiUrl = `https://eservices.dls.moi.gov.cy/arcgis/rest/services/National/General_Search/MapServer/0/query?f=json&outFields=PLAN_NBR,PLAN_NBR,DIST_CODE,VIL_CODE,QRTR_CODE,SHEET,SRC_SL_CODE&returnDistinctValues=true&returnGeometry=false&where=DIST_CODE%3D${distCode}+and+VIL_CODE%3D${vilCode}+and+QRTR_CODE%3D${qrtrCode}+and+SHEET%3D${sheet}`;
+
+		const response = await fetch(apiUrl);
+		if (!response.ok) {
+			throw new Error(`ArcGIS API error! status: ${response.status}`);
+		}
+
+		const data = await response.json();
+		if (data.features && Array.isArray(data.features)) {
+			const plans = new Set();
+			data.features.forEach((feature) => {
+				const planNbr = feature.attributes?.PLAN_NBR;
+				if (
+					planNbr !== undefined &&
+					planNbr !== null &&
+					planNbr !== ""
+				) {
+					plans.add(String(planNbr));
+				}
+			});
+
+			// Convert to array and sort
+			const planArray = Array.from(plans).sort((a, b) => {
+				const numA = parseInt(String(a).match(/\d+/)?.[0] || "0");
+				const numB = parseInt(String(b).match(/\d+/)?.[0] || "0");
+				if (numA !== numB) {
+					return numA - numB;
+				}
+				return String(a).localeCompare(String(b));
+			});
+
+			return res.json({ plans: planArray });
+		}
+		return res.json({ plans: [] });
+	} catch (error) {
+		console.error("Error fetching plans:", error);
+		return res
+			.status(500)
+			.json({ message: error.message || "Failed to fetch plans" });
+	}
+});
+
+// Query parcel by all parameters
+app.post("/api/cadastral/query", async (req, res) => {
+	try {
+		const { distCode, vilCode, qrtrCode, sheet, planNbr, parcelNbr } =
+			req.body;
+
+		if (
+			!distCode ||
+			!vilCode ||
+			qrtrCode === undefined ||
+			!sheet ||
+			!planNbr ||
+			!parcelNbr
+		) {
+			return res.status(400).json({
+				message:
+					"Missing required parameters: distCode, vilCode, qrtrCode, sheet, planNbr, parcelNbr",
+			});
+		}
+
+		// Build the where clause
+		const qrtrCodeValue =
+			qrtrCode !== null && qrtrCode !== undefined ? qrtrCode : 0;
+		const blckCode = 0; // Default to 0 as per example
+		const whereClause = `DIST_CODE=${distCode}+and+VIL_CODE=${vilCode}+and+QRTR_CODE=${qrtrCodeValue}+and+BLCK_CODE=${blckCode}+and+SHEET=${sheet}+and+PLAN_NBR='${planNbr}'+and+PARCEL_NBR=${parcelNbr}`;
+
+		// Build the outSR parameter (URL encoded JSON)
+		const outSR = {
+			wkid: 102100,
+			latestWkid: 3857,
+			xyTolerance: 0.001,
+			zTolerance: 0.001,
+			mTolerance: 0.001,
+			falseX: -20037700,
+			falseY: -30241100,
+			xyUnits: 10000,
+			falseZ: -100000,
+			zUnits: 10000,
+			falseM: -100000,
+			mUnits: 10000,
+		};
+
+		// Build the full URL
+		const baseUrl =
+			"https://eservices.dls.moi.gov.cy/arcgis/rest/services/National/General_Search/MapServer/0/query";
+		const outSREncoded = encodeURIComponent(JSON.stringify(outSR));
+		const whereEncoded = encodeURIComponent(whereClause).replace(
+			/%2B/g,
+			"+"
+		); // Replace %2B with + to match original format
+		const fullUrl = `${baseUrl}?f=json&outFields=*&outSR=${outSREncoded}&returnGeometry=true&where=${whereEncoded}`;
+
+		const response = await fetch(fullUrl);
+		if (!response.ok) {
+			throw new Error(`ArcGIS API error! status: ${response.status}`);
+		}
+
+		const data = await response.json();
+
+		// Extract SBPI_ID_NO from the response
+		const sbpiId = data?.features?.[0]?.attributes?.SBPI_ID_NO;
+
+		// If SBPI ID is found, fetch parcel details
+		let parcelDetails = null;
+		if (sbpiId !== undefined && sbpiId !== null) {
+			try {
+				const parcelInfoUrl = `https://eservices.dls.moi.gov.cy/Services/Rest/Info/GeneralParcelIdentify?subPropertyId=${sbpiId}`;
+				const parcelInfoResponse = await fetch(parcelInfoUrl);
+				if (parcelInfoResponse.ok) {
+					parcelDetails = await parcelInfoResponse.json();
+				}
+			} catch (parcelError) {
+				console.error(
+					`[Parcel Query] Error fetching parcel details:`,
+					parcelError.message
+				);
+			}
+		}
+
+		return res.json({
+			success: true,
+			sbpiIdNo: sbpiId !== undefined && sbpiId !== null ? sbpiId : null,
+			data: data,
+			parcelDetails: parcelDetails,
+		});
+	} catch (error) {
+		console.error("Error querying parcel:", error);
+		return res
+			.status(500)
+			.json({ message: error.message || "Failed to query parcel" });
 	}
 });
 
