@@ -4027,6 +4027,33 @@ app.patch("/api/templates/:id/reactivate", async (req, res) => {
 	}
 });
 
+// Helper function for ArcGIS API requests with proper headers and timeout
+async function fetchArcGisApi(url, options = {}) {
+	const controller = new AbortController();
+	const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
+
+	try {
+		const response = await fetch(url, {
+			...options,
+			signal: controller.signal,
+			headers: {
+				'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+				'Accept': 'application/json, text/plain, */*',
+				'Accept-Language': 'en-US,en;q=0.9',
+				...options.headers,
+			},
+		});
+		clearTimeout(timeoutId);
+		return response;
+	} catch (error) {
+		clearTimeout(timeoutId);
+		if (error.name === 'AbortError') {
+			throw new Error('Request timeout: ArcGIS API did not respond within 30 seconds');
+		}
+		throw error;
+	}
+}
+
 // Cadastral/ArcGIS API Proxy Endpoints
 // Get regions (municipalities) for a province
 app.get("/api/cadastral/provinces/:provinceCode/regions", async (req, res) => {
@@ -4036,7 +4063,7 @@ app.get("/api/cadastral/provinces/:provinceCode/regions", async (req, res) => {
 		const distCode = provinceCode.replace(/^3D/, "");
 		const apiUrl = `https://eservices.dls.moi.gov.cy/arcgis/rest/services/National/General_Search/MapServer/11/query?f=json&outFields=VIL_CODE,DIST_CODE,VIL_NM_G&returnDistinctValues=false&returnGeometry=false&where=DIST_CODE%3D${distCode}`;
 
-		const response = await fetch(apiUrl);
+		const response = await fetchArcGisApi(apiUrl);
 		if (!response.ok) {
 			throw new Error(`ArcGIS API error! status: ${response.status}`);
 		}
@@ -4069,7 +4096,7 @@ app.get(
 			const { distCode, vilCode } = req.params;
 			const apiUrl = `https://eservices.dls.moi.gov.cy/arcgis/rest/services/National/General_Search/MapServer/10/query?f=json&outFields=QRTR_CODE,VIL_CODE,DIST_CODE,QRTR_NM_G&returnDistinctValues=false&returnGeometry=false&where=DIST_CODE%3D${distCode}+and+VIL_CODE%3D${vilCode}`;
 
-			const response = await fetch(apiUrl);
+			const response = await fetchArcGisApi(apiUrl);
 			if (!response.ok) {
 				throw new Error(`ArcGIS API error! status: ${response.status}`);
 			}
@@ -4106,7 +4133,7 @@ app.get("/api/cadastral/sheets", async (req, res) => {
 
 		const apiUrl = `https://eservices.dls.moi.gov.cy/arcgis/rest/services/National/General_Search/MapServer/0/query?f=json&outFields=SHEET,SHEET,DIST_CODE,VIL_CODE,QRTR_CODE&returnDistinctValues=true&returnGeometry=false&where=DIST_CODE%3D${distCode}+and+VIL_CODE%3D${vilCode}+and+QRTR_CODE%3D${qrtrCode}`;
 
-		const response = await fetch(apiUrl);
+		const response = await fetchArcGisApi(apiUrl);
 		if (!response.ok) {
 			throw new Error(`ArcGIS API error! status: ${response.status}`);
 		}
@@ -4155,7 +4182,7 @@ app.get("/api/cadastral/plans", async (req, res) => {
 
 		const apiUrl = `https://eservices.dls.moi.gov.cy/arcgis/rest/services/National/General_Search/MapServer/0/query?f=json&outFields=PLAN_NBR,PLAN_NBR,DIST_CODE,VIL_CODE,QRTR_CODE,SHEET,SRC_SL_CODE&returnDistinctValues=true&returnGeometry=false&where=DIST_CODE%3D${distCode}+and+VIL_CODE%3D${vilCode}+and+QRTR_CODE%3D${qrtrCode}+and+SHEET%3D${sheet}`;
 
-		const response = await fetch(apiUrl);
+		const response = await fetchArcGisApi(apiUrl);
 		if (!response.ok) {
 			throw new Error(`ArcGIS API error! status: ${response.status}`);
 		}
@@ -4247,7 +4274,7 @@ app.post("/api/cadastral/query", async (req, res) => {
 		); // Replace %2B with + to match original format
 		const fullUrl = `${baseUrl}?f=json&outFields=*&outSR=${outSREncoded}&returnGeometry=true&where=${whereEncoded}`;
 
-		const response = await fetch(fullUrl);
+		const response = await fetchArcGisApi(fullUrl);
 		if (!response.ok) {
 			throw new Error(`ArcGIS API error! status: ${response.status}`);
 		}
@@ -4262,7 +4289,7 @@ app.post("/api/cadastral/query", async (req, res) => {
 		if (sbpiId !== undefined && sbpiId !== null) {
 			try {
 				const parcelInfoUrl = `https://eservices.dls.moi.gov.cy/Services/Rest/Info/GeneralParcelIdentify?subPropertyId=${sbpiId}`;
-				const parcelInfoResponse = await fetch(parcelInfoUrl);
+				const parcelInfoResponse = await fetchArcGisApi(parcelInfoUrl);
 				if (parcelInfoResponse.ok) {
 					parcelDetails = await parcelInfoResponse.json();
 				}
