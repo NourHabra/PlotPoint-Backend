@@ -3575,9 +3575,10 @@ async function fetchArcGisApi(url, options = {}) {
 			...options,
 			signal: controller.signal,
 			headers: {
-				'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-				'Accept': 'application/json, text/plain, */*',
-				'Accept-Language': 'en-US,en;q=0.9',
+				"User-Agent":
+					"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+				Accept: "application/json, text/plain, */*",
+				"Accept-Language": "en-US,en;q=0.9",
 				...options.headers,
 			},
 		});
@@ -3585,8 +3586,10 @@ async function fetchArcGisApi(url, options = {}) {
 		return response;
 	} catch (error) {
 		clearTimeout(timeoutId);
-		if (error.name === 'AbortError') {
-			throw new Error('Request timeout: ArcGIS API did not respond within 30 seconds');
+		if (error.name === "AbortError") {
+			throw new Error(
+				"Request timeout: ArcGIS API did not respond within 30 seconds"
+			);
 		}
 		throw error;
 	}
@@ -3626,7 +3629,7 @@ app.get("/api/cadastral/provinces/:provinceCode/regions", async (req, res) => {
 	}
 });
 
-// Get QRTR_CODE for a region
+// Get quarters for a region
 app.get(
 	"/api/cadastral/regions/:distCode/:vilCode/qrtr-code",
 	async (req, res) => {
@@ -3645,14 +3648,18 @@ app.get(
 				Array.isArray(data.features) &&
 				data.features.length > 0
 			) {
-				const qrtrCode = data.features[0].attributes?.QRTR_CODE;
-				return res.json({ qrtrCode });
+				// Return all quarters with their codes and names
+				const quarters = data.features.map((feature) => ({
+					qrtrCode: feature.attributes.QRTR_CODE,
+					qrtrName: feature.attributes.QRTR_NM_G || null,
+				}));
+				return res.json({ quarters });
 			}
-			return res.json({ qrtrCode: null });
+			return res.json({ quarters: [] });
 		} catch (error) {
-			console.error("Error fetching QRTR_CODE:", error);
+			console.error("Error fetching quarters:", error);
 			return res.status(500).json({
-				message: error.message || "Failed to fetch QRTR_CODE",
+				message: error.message || "Failed to fetch quarters",
 			});
 		}
 	}
@@ -3760,6 +3767,61 @@ app.get("/api/cadastral/plans", async (req, res) => {
 	}
 });
 
+// Get sections (BLCK_CODE) for a plan
+app.get("/api/cadastral/sections", async (req, res) => {
+	try {
+		const { distCode, vilCode, qrtrCode, sheet, planNbr } = req.query;
+		if (
+			!distCode ||
+			!vilCode ||
+			qrtrCode === undefined ||
+			!sheet ||
+			!planNbr
+		) {
+			return res.status(400).json({
+				message:
+					"Missing required parameters: distCode, vilCode, qrtrCode, sheet, planNbr",
+			});
+		}
+
+		const apiUrl = `https://eservices.dls.moi.gov.cy/arcgis/rest/services/National/General_Search/MapServer/0/query?f=json&outFields=BLCK_CODE,BLCK_CODE,DIST_CODE,VIL_CODE,QRTR_CODE,SHEET,PLAN_NBR&returnDistinctValues=true&returnGeometry=false&where=DIST_CODE%3D${distCode}+and+VIL_CODE%3D${vilCode}+and+QRTR_CODE%3D${qrtrCode}+and+SHEET%3D${sheet}+and+PLAN_NBR%3D%27${planNbr}%27`;
+
+		const response = await fetchArcGisApi(apiUrl);
+		if (!response.ok) {
+			throw new Error(`ArcGIS API error! status: ${response.status}`);
+		}
+
+		const data = await response.json();
+		if (data.features && Array.isArray(data.features)) {
+			const sections = new Set();
+			data.features.forEach((feature) => {
+				const blckCode = feature.attributes?.BLCK_CODE;
+				if (blckCode !== undefined && blckCode !== null) {
+					sections.add(String(blckCode));
+				}
+			});
+
+			// Convert to array and sort numerically
+			const sectionArray = Array.from(sections).sort((a, b) => {
+				const numA = Number(a);
+				const numB = Number(b);
+				if (!isNaN(numA) && !isNaN(numB)) {
+					return numA - numB;
+				}
+				return String(a).localeCompare(String(b));
+			});
+
+			return res.json({ sections: sectionArray });
+		}
+		return res.json({ sections: [] });
+	} catch (error) {
+		console.error("Error fetching sections:", error);
+		return res
+			.status(500)
+			.json({ message: error.message || "Failed to fetch sections" });
+	}
+});
+
 // Query parcel by all parameters
 app.post("/api/cadastral/query", async (req, res) => {
 	try {
@@ -3826,10 +3888,28 @@ app.post("/api/cadastral/query", async (req, res) => {
 		let parcelDetails = null;
 		if (sbpiId !== undefined && sbpiId !== null) {
 			try {
+				console.log(
+					`[Parcel Query] Fetching parcel details for SBPI_ID_NO: ${sbpiId}`
+				);
 				const parcelInfoUrl = `https://eservices.dls.moi.gov.cy/Services/Rest/Info/GeneralParcelIdentify?subPropertyId=${sbpiId}`;
 				const parcelInfoResponse = await fetchArcGisApi(parcelInfoUrl);
 				if (parcelInfoResponse.ok) {
-					parcelDetails = await parcelInfoResponse.json();
+					const rawDetails = await parcelInfoResponse.json();
+					// If response is an array, take the first item; otherwise use as-is
+					parcelDetails = Array.isArray(rawDetails)
+						? rawDetails[0]
+						: rawDetails;
+					console.log(
+						`[Parcel Query] Successfully fetched parcel details for SBPI_ID_NO: ${sbpiId}`
+					);
+					console.log(
+						`[Parcel Query] Parcel details structure:`,
+						JSON.stringify(parcelDetails).substring(0, 200) + "..."
+					);
+				} else {
+					console.error(
+						`[Parcel Query] Failed to fetch parcel details. Status: ${parcelInfoResponse.status}`
+					);
 				}
 			} catch (parcelError) {
 				console.error(
