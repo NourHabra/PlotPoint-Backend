@@ -24,15 +24,11 @@ function tryUnlinkFile(targetFile) {
 		try {
 			fs.unlinkSync(targetFile);
 			try {
-				console.log("[appendix][delete:file]", targetFile);
+				console.log("[appendix][delete:file]");
 			} catch (_) {}
 		} catch (e1) {
 			try {
-				console.log(
-					"[appendix][delete:file failed]",
-					targetFile,
-					e1 && e1.message
-				);
+				console.log("[appendix][delete:file failed]", e1 && e1.message);
 			} catch (_) {}
 		}
 	} catch (_) {}
@@ -45,7 +41,7 @@ function forceRemoveSync(targetPath) {
 		try {
 			fs.rmSync(resolved, { recursive: true, force: true });
 			try {
-				console.log("[appendix][delete:dir]", resolved);
+				console.log("[appendix][delete:dir]");
 			} catch (_) {}
 			return;
 		} catch (e) {
@@ -321,7 +317,7 @@ async function refreshIndexesWithMacro(
 		macroArg,
 	];
 	try {
-		console.log("[gen][macro] command:", sofficePath, args.join(" "));
+		console.log("[gen][macro] executing");
 	} catch (_) {}
 	await new Promise((resolve, reject) => {
 		execFile(
@@ -516,7 +512,7 @@ async function appendImagesBatchToDocWithMacro(
 		macroArg,
 	];
 	try {
-		console.log(`[appendix][batch][cmd] ${sofficePath} ${args.join(" ")}`);
+		console.log(`[appendix][batch] executing`);
 	} catch (_) {}
 	await new Promise((resolve, reject) => {
 		execFile(
@@ -532,9 +528,7 @@ async function appendImagesBatchToDocWithMacro(
 					return reject(new Error(detail));
 				}
 				try {
-					console.log(
-						`[appendix][batch][ok] ${sofficePath} ${args.join(" ")}`
-					);
+					console.log(`[appendix][batch] completed`);
 				} catch (_) {}
 				resolve();
 			}
@@ -565,9 +559,7 @@ async function replacePlaceholdersWithImagesBatchUsingMacro(
 		macroArg,
 	];
 	try {
-		console.log(
-			`[inline-img][batch][cmd] ${sofficePath} ${args.join(" ")}`
-		);
+		console.log(`[inline-img][batch] executing`);
 	} catch (_) {}
 	await new Promise((resolve, reject) => {
 		execFile(
@@ -583,11 +575,7 @@ async function replacePlaceholdersWithImagesBatchUsingMacro(
 					return reject(new Error(detail));
 				}
 				try {
-					console.log(
-						`[inline-img][batch][ok] ${sofficePath} ${args.join(
-							" "
-						)}`
-					);
+					console.log(`[inline-img][batch] completed`);
 				} catch (_) {}
 				resolve();
 			}
@@ -1447,8 +1435,6 @@ async function generateFromTemplate(
 		console.log("[gen] start", {
 			templateId: String(template._id || ""),
 			output,
-			sourceDocxPath: template.sourceDocxPath,
-			keys: Object.keys(inputValues || {}),
 		});
 	} catch (_) {}
 
@@ -1609,7 +1595,7 @@ async function generateFromTemplate(
 	const outDocx = path.join(uploadsDir, `out-${Date.now()}.docx`);
 	fs.writeFileSync(outDocx, buf);
 	try {
-		console.log("[gen] wrote docx", outDocx);
+		console.log("[gen] wrote docx");
 	} catch (_) {}
 
 	// Cleanup working file and any temp images created for macro insertion
@@ -1734,7 +1720,7 @@ async function generateFromTemplate(
 			});
 		}
 		const outPdf = outDocx.replace(/\.docx$/, ".pdf");
-		console.log("[gen] streaming pdf", outPdf);
+		console.log("[gen] streaming pdf");
 		res.setHeader("Content-Type", "application/pdf");
 		res.setHeader("Content-Disposition", `attachment; filename=report.pdf`);
 		const pdfStream = fs.createReadStream(outPdf);
@@ -1760,7 +1746,7 @@ async function generateFromTemplate(
 		"application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 	);
 	res.setHeader("Content-Disposition", `attachment; filename=report.docx`);
-	console.log("[gen] streaming docx", outDocx);
+	console.log("[gen] streaming docx");
 	const docxStream = fs.createReadStream(outDocx);
 	docxStream.pipe(res);
 	const cleanupDocx = () => {
@@ -2617,14 +2603,9 @@ app.post(
 				ensureDirSync(itemDir);
 				try {
 					console.log(
-						"[appendix][upload] report:",
-						String(report._id),
-						"item:",
-						String(newObjectId),
-						"dir:",
-						itemDir,
-						"kind:",
-						isPdf ? "pdf" : isImage ? "image" : "unknown"
+						"[appendix][upload]",
+						isPdf ? "pdf" : isImage ? "image" : "unknown",
+						"uploaded"
 					);
 				} catch (_) {}
 				let itemDoc = {
@@ -2657,12 +2638,7 @@ app.post(
 						itemDoc.thumbPath = th;
 					} catch (_) {}
 					try {
-						console.log("[appendix][upload] saved image:", dest);
-						if (itemDoc.thumbPath)
-							console.log(
-								"[appendix][upload] thumb:",
-								itemDoc.thumbPath
-							);
+						console.log("[appendix][upload] image saved");
 					} catch (_) {}
 					outItems.push(itemDoc);
 				} else if (isPdf) {
@@ -2691,17 +2667,11 @@ app.post(
 						}
 					} catch (_) {}
 					try {
-						console.log("[appendix][upload] saved pdf:", pdfPath);
 						console.log(
-							"[appendix][upload] pages:",
+							"[appendix][upload] pdf saved with",
 							imgs.length,
-							pagesDir
+							"pages"
 						);
-						if (itemDoc.thumbPath)
-							console.log(
-								"[appendix][upload] thumb:",
-								itemDoc.thumbPath
-							);
 					} catch (_) {}
 					outItems.push(itemDoc);
 				}
@@ -2805,7 +2775,6 @@ app.delete("/api/reports/:id/appendix/:itemId", async (req, res) => {
 					try {
 						console.log(
 							"[appendix][delete] rm failed:",
-							target,
 							e && e.message
 						);
 					} catch (_) {}
@@ -3888,9 +3857,7 @@ app.post("/api/cadastral/query", async (req, res) => {
 		let parcelDetails = null;
 		if (sbpiId !== undefined && sbpiId !== null) {
 			try {
-				console.log(
-					`[Parcel Query] Fetching parcel details for SBPI_ID_NO: ${sbpiId}`
-				);
+				console.log(`[Parcel Query] Fetching parcel details`);
 				const parcelInfoUrl = `https://eservices.dls.moi.gov.cy/Services/Rest/Info/GeneralParcelIdentify?subPropertyId=${sbpiId}`;
 				const parcelInfoResponse = await fetchArcGisApi(parcelInfoUrl);
 				if (parcelInfoResponse.ok) {
@@ -3900,11 +3867,7 @@ app.post("/api/cadastral/query", async (req, res) => {
 						? rawDetails[0]
 						: rawDetails;
 					console.log(
-						`[Parcel Query] Successfully fetched parcel details for SBPI_ID_NO: ${sbpiId}`
-					);
-					console.log(
-						`[Parcel Query] Parcel details structure:`,
-						JSON.stringify(parcelDetails).substring(0, 200) + "..."
+						`[Parcel Query] Parcel details fetched successfully`
 					);
 				} else {
 					console.error(
