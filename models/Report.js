@@ -56,6 +56,29 @@ const reportSchema = new mongoose.Schema(
 			type: mongoose.Schema.Types.Mixed,
 			default: {},
 		},
+		// Parcel search data (saved for quick access on report edit)
+		sbpiIdNo: {
+			type: Number,
+		},
+		parcelDetails: {
+			type: mongoose.Schema.Types.Mixed,
+		},
+		parcelFetchedAt: {
+			type: Date,
+		},
+		parcelSearchParams: {
+			type: new mongoose.Schema(
+				{
+					distCode: { type: Number },
+					vilCode: { type: Number },
+					qrtrCode: { type: Number },
+					sheet: { type: String },
+					planNbr: { type: String },
+					parcelNbr: { type: String },
+				},
+				{ _id: false }
+			),
+		},
 		createdBy: {
 			type: String,
 			default: "system",

@@ -2836,6 +2836,10 @@ app.put("/api/reports/:id", async (req, res) => {
 			kmlData,
 			checklistProgress,
 			checklistStatus,
+			sbpiIdNo,
+			parcelDetails,
+			parcelFetchedAt,
+			parcelSearchParams,
 		} = req.body || {};
 		const prevImageUrls = collectLocalImageUrls(existing.values || {});
 		if (
@@ -2879,6 +2883,10 @@ app.put("/api/reports/:id", async (req, res) => {
 			...(finalValues !== undefined && { values: finalValues }),
 			...(status !== undefined && { status }),
 			...(kmlData !== undefined && { kmlData }),
+			...(sbpiIdNo !== undefined && { sbpiIdNo }),
+			...(parcelDetails !== undefined && { parcelDetails }),
+			...(parcelFetchedAt !== undefined && { parcelFetchedAt }),
+			...(parcelSearchParams !== undefined && { parcelSearchParams }),
 		};
 		if (Array.isArray(checklistProgress)) {
 			updatePayload.checklistProgress = checklistProgress.map((it) => ({
@@ -3887,6 +3895,14 @@ app.post("/api/cadastral/query", async (req, res) => {
 			sbpiIdNo: sbpiId !== undefined && sbpiId !== null ? sbpiId : null,
 			data: data,
 			parcelDetails: parcelDetails,
+			searchParams: {
+				distCode,
+				vilCode,
+				qrtrCode: qrtrCodeValue,
+				sheet,
+				planNbr,
+				parcelNbr,
+			},
 		});
 	} catch (error) {
 		console.error("Error querying parcel:", error);
