@@ -25,15 +25,11 @@ function tryUnlinkFile(targetFile) {
 		try {
 			fs.unlinkSync(targetFile);
 			try {
-				console.log("[appendix][delete:file]", targetFile);
+				console.log("[appendix][delete:file]");
 			} catch (_) {}
 		} catch (e1) {
 			try {
-				console.log(
-					"[appendix][delete:file failed]",
-					targetFile,
-					e1 && e1.message
-				);
+				console.log("[appendix][delete:file failed]", e1 && e1.message);
 			} catch (_) {}
 		}
 	} catch (_) {}
@@ -46,7 +42,7 @@ function forceRemoveSync(targetPath) {
 		try {
 			fs.rmSync(resolved, { recursive: true, force: true });
 			try {
-				console.log("[appendix][delete:dir]", resolved);
+				console.log("[appendix][delete:dir]");
 			} catch (_) {}
 			return;
 		} catch (e) {
@@ -331,7 +327,7 @@ async function refreshIndexesWithMacro(
 		macroArg,
 	];
 	try {
-		console.log("[gen][macro] command:", sofficePath, args.join(" "));
+		console.log("[gen][macro] executing");
 	} catch (_) {}
 	await new Promise((resolve, reject) => {
 		execFile(
@@ -526,7 +522,7 @@ async function appendImagesBatchToDocWithMacro(
 		macroArg,
 	];
 	try {
-		console.log(`[appendix][batch][cmd] ${sofficePath} ${args.join(" ")}`);
+		console.log(`[appendix][batch] executing`);
 	} catch (_) {}
 	await new Promise((resolve, reject) => {
 		execFile(
@@ -542,9 +538,7 @@ async function appendImagesBatchToDocWithMacro(
 					return reject(new Error(detail));
 				}
 				try {
-					console.log(
-						`[appendix][batch][ok] ${sofficePath} ${args.join(" ")}`
-					);
+					console.log(`[appendix][batch] completed`);
 				} catch (_) {}
 				resolve();
 			}
@@ -575,9 +569,7 @@ async function replacePlaceholdersWithImagesBatchUsingMacro(
 		macroArg,
 	];
 	try {
-		console.log(
-			`[inline-img][batch][cmd] ${sofficePath} ${args.join(" ")}`
-		);
+		console.log(`[inline-img][batch] executing`);
 	} catch (_) {}
 	await new Promise((resolve, reject) => {
 		execFile(
@@ -593,11 +585,7 @@ async function replacePlaceholdersWithImagesBatchUsingMacro(
 					return reject(new Error(detail));
 				}
 				try {
-					console.log(
-						`[inline-img][batch][ok] ${sofficePath} ${args.join(
-							" "
-						)}`
-					);
+					console.log(`[inline-img][batch] completed`);
 				} catch (_) {}
 				resolve();
 			}
@@ -1909,8 +1897,6 @@ async function generateFromTemplate(
 		console.log("[gen] start", {
 			templateId: String(template._id || ""),
 			output,
-			sourceDocxPath: template.sourceDocxPath,
-			keys: Object.keys(inputValues || {}),
 		});
 	} catch (_) {}
 
@@ -2071,7 +2057,7 @@ async function generateFromTemplate(
 	const outDocx = path.join(uploadsDir, `out-${Date.now()}.docx`);
 	fs.writeFileSync(outDocx, buf);
 	try {
-		console.log("[gen] wrote docx", outDocx);
+		console.log("[gen] wrote docx");
 	} catch (_) {}
 
 	// Cleanup working file and any temp images created for macro insertion
@@ -2196,7 +2182,7 @@ async function generateFromTemplate(
 			});
 		}
 		const outPdf = outDocx.replace(/\.docx$/, ".pdf");
-		console.log("[gen] streaming pdf", outPdf);
+		console.log("[gen] streaming pdf");
 		res.setHeader("Content-Type", "application/pdf");
 		res.setHeader("Content-Disposition", `attachment; filename=report.pdf`);
 		const pdfStream = fs.createReadStream(outPdf);
@@ -2222,7 +2208,7 @@ async function generateFromTemplate(
 		"application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 	);
 	res.setHeader("Content-Disposition", `attachment; filename=report.docx`);
-	console.log("[gen] streaming docx", outDocx);
+	console.log("[gen] streaming docx");
 	const docxStream = fs.createReadStream(outDocx);
 	docxStream.pipe(res);
 	const cleanupDocx = () => {
@@ -3079,14 +3065,9 @@ app.post(
 				ensureDirSync(itemDir);
 				try {
 					console.log(
-						"[appendix][upload] report:",
-						String(report._id),
-						"item:",
-						String(newObjectId),
-						"dir:",
-						itemDir,
-						"kind:",
-						isPdf ? "pdf" : isImage ? "image" : "unknown"
+						"[appendix][upload]",
+						isPdf ? "pdf" : isImage ? "image" : "unknown",
+						"uploaded"
 					);
 				} catch (_) {}
 				let itemDoc = {
@@ -3119,12 +3100,7 @@ app.post(
 						itemDoc.thumbPath = th;
 					} catch (_) {}
 					try {
-						console.log("[appendix][upload] saved image:", dest);
-						if (itemDoc.thumbPath)
-							console.log(
-								"[appendix][upload] thumb:",
-								itemDoc.thumbPath
-							);
+						console.log("[appendix][upload] image saved");
 					} catch (_) {}
 					outItems.push(itemDoc);
 				} else if (isPdf) {
@@ -3153,17 +3129,11 @@ app.post(
 						}
 					} catch (_) {}
 					try {
-						console.log("[appendix][upload] saved pdf:", pdfPath);
 						console.log(
-							"[appendix][upload] pages:",
+							"[appendix][upload] pdf saved with",
 							imgs.length,
-							pagesDir
+							"pages"
 						);
-						if (itemDoc.thumbPath)
-							console.log(
-								"[appendix][upload] thumb:",
-								itemDoc.thumbPath
-							);
 					} catch (_) {}
 					outItems.push(itemDoc);
 				}
@@ -3267,7 +3237,6 @@ app.delete("/api/reports/:id/appendix/:itemId", async (req, res) => {
 					try {
 						console.log(
 							"[appendix][delete] rm failed:",
-							target,
 							e && e.message
 						);
 					} catch (_) {}
@@ -3329,6 +3298,10 @@ app.put("/api/reports/:id", async (req, res) => {
 			kmlData,
 			checklistProgress,
 			checklistStatus,
+			sbpiIdNo,
+			parcelDetails,
+			parcelFetchedAt,
+			parcelSearchParams,
 		} = req.body || {};
 		const prevImageUrls = collectLocalImageUrls(existing.values || {});
 		if (
@@ -3372,6 +3345,10 @@ app.put("/api/reports/:id", async (req, res) => {
 			...(finalValues !== undefined && { values: finalValues }),
 			...(status !== undefined && { status }),
 			...(kmlData !== undefined && { kmlData }),
+			...(sbpiIdNo !== undefined && { sbpiIdNo }),
+			...(parcelDetails !== undefined && { parcelDetails }),
+			...(parcelFetchedAt !== undefined && { parcelFetchedAt }),
+			...(parcelSearchParams !== undefined && { parcelSearchParams }),
 		};
 		if (Array.isArray(checklistProgress)) {
 			updatePayload.checklistProgress = checklistProgress.map((it) => ({
@@ -4037,9 +4014,10 @@ async function fetchArcGisApi(url, options = {}) {
 			...options,
 			signal: controller.signal,
 			headers: {
-				'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-				'Accept': 'application/json, text/plain, */*',
-				'Accept-Language': 'en-US,en;q=0.9',
+				"User-Agent":
+					"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+				Accept: "application/json, text/plain, */*",
+				"Accept-Language": "en-US,en;q=0.9",
 				...options.headers,
 			},
 		});
@@ -4047,8 +4025,10 @@ async function fetchArcGisApi(url, options = {}) {
 		return response;
 	} catch (error) {
 		clearTimeout(timeoutId);
-		if (error.name === 'AbortError') {
-			throw new Error('Request timeout: ArcGIS API did not respond within 30 seconds');
+		if (error.name === "AbortError") {
+			throw new Error(
+				"Request timeout: ArcGIS API did not respond within 30 seconds"
+			);
 		}
 		throw error;
 	}
@@ -4088,7 +4068,7 @@ app.get("/api/cadastral/provinces/:provinceCode/regions", async (req, res) => {
 	}
 });
 
-// Get QRTR_CODE for a region
+// Get quarters for a region
 app.get(
 	"/api/cadastral/regions/:distCode/:vilCode/qrtr-code",
 	async (req, res) => {
@@ -4107,14 +4087,18 @@ app.get(
 				Array.isArray(data.features) &&
 				data.features.length > 0
 			) {
-				const qrtrCode = data.features[0].attributes?.QRTR_CODE;
-				return res.json({ qrtrCode });
+				// Return all quarters with their codes and names
+				const quarters = data.features.map((feature) => ({
+					qrtrCode: feature.attributes.QRTR_CODE,
+					qrtrName: feature.attributes.QRTR_NM_G || null,
+				}));
+				return res.json({ quarters });
 			}
-			return res.json({ qrtrCode: null });
+			return res.json({ quarters: [] });
 		} catch (error) {
-			console.error("Error fetching QRTR_CODE:", error);
+			console.error("Error fetching quarters:", error);
 			return res.status(500).json({
-				message: error.message || "Failed to fetch QRTR_CODE",
+				message: error.message || "Failed to fetch quarters",
 			});
 		}
 	}
@@ -4222,6 +4206,61 @@ app.get("/api/cadastral/plans", async (req, res) => {
 	}
 });
 
+// Get sections (BLCK_CODE) for a plan
+app.get("/api/cadastral/sections", async (req, res) => {
+	try {
+		const { distCode, vilCode, qrtrCode, sheet, planNbr } = req.query;
+		if (
+			!distCode ||
+			!vilCode ||
+			qrtrCode === undefined ||
+			!sheet ||
+			!planNbr
+		) {
+			return res.status(400).json({
+				message:
+					"Missing required parameters: distCode, vilCode, qrtrCode, sheet, planNbr",
+			});
+		}
+
+		const apiUrl = `https://eservices.dls.moi.gov.cy/arcgis/rest/services/National/General_Search/MapServer/0/query?f=json&outFields=BLCK_CODE,BLCK_CODE,DIST_CODE,VIL_CODE,QRTR_CODE,SHEET,PLAN_NBR&returnDistinctValues=true&returnGeometry=false&where=DIST_CODE%3D${distCode}+and+VIL_CODE%3D${vilCode}+and+QRTR_CODE%3D${qrtrCode}+and+SHEET%3D${sheet}+and+PLAN_NBR%3D%27${planNbr}%27`;
+
+		const response = await fetchArcGisApi(apiUrl);
+		if (!response.ok) {
+			throw new Error(`ArcGIS API error! status: ${response.status}`);
+		}
+
+		const data = await response.json();
+		if (data.features && Array.isArray(data.features)) {
+			const sections = new Set();
+			data.features.forEach((feature) => {
+				const blckCode = feature.attributes?.BLCK_CODE;
+				if (blckCode !== undefined && blckCode !== null) {
+					sections.add(String(blckCode));
+				}
+			});
+
+			// Convert to array and sort numerically
+			const sectionArray = Array.from(sections).sort((a, b) => {
+				const numA = Number(a);
+				const numB = Number(b);
+				if (!isNaN(numA) && !isNaN(numB)) {
+					return numA - numB;
+				}
+				return String(a).localeCompare(String(b));
+			});
+
+			return res.json({ sections: sectionArray });
+		}
+		return res.json({ sections: [] });
+	} catch (error) {
+		console.error("Error fetching sections:", error);
+		return res
+			.status(500)
+			.json({ message: error.message || "Failed to fetch sections" });
+	}
+});
+
 // Query parcel by all parameters
 app.post("/api/cadastral/query", async (req, res) => {
 	try {
@@ -4288,10 +4327,22 @@ app.post("/api/cadastral/query", async (req, res) => {
 		let parcelDetails = null;
 		if (sbpiId !== undefined && sbpiId !== null) {
 			try {
+				console.log(`[Parcel Query] Fetching parcel details`);
 				const parcelInfoUrl = `https://eservices.dls.moi.gov.cy/Services/Rest/Info/GeneralParcelIdentify?subPropertyId=${sbpiId}`;
 				const parcelInfoResponse = await fetchArcGisApi(parcelInfoUrl);
 				if (parcelInfoResponse.ok) {
-					parcelDetails = await parcelInfoResponse.json();
+					const rawDetails = await parcelInfoResponse.json();
+					// If response is an array, take the first item; otherwise use as-is
+					parcelDetails = Array.isArray(rawDetails)
+						? rawDetails[0]
+						: rawDetails;
+					console.log(
+						`[Parcel Query] Parcel details fetched successfully`
+					);
+				} else {
+					console.error(
+						`[Parcel Query] Failed to fetch parcel details. Status: ${parcelInfoResponse.status}`
+					);
 				}
 			} catch (parcelError) {
 				console.error(
@@ -4306,6 +4357,14 @@ app.post("/api/cadastral/query", async (req, res) => {
 			sbpiIdNo: sbpiId !== undefined && sbpiId !== null ? sbpiId : null,
 			data: data,
 			parcelDetails: parcelDetails,
+			searchParams: {
+				distCode,
+				vilCode,
+				qrtrCode: qrtrCodeValue,
+				sheet,
+				planNbr,
+				parcelNbr,
+			},
 		});
 	} catch (error) {
 		console.error("Error querying parcel:", error);
