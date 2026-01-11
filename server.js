@@ -13,6 +13,23 @@ const fetch = require("node-fetch");
 const sharp = require("sharp");
 require("dotenv").config();
 
+// Import security middleware
+const {
+	helmetConfig,
+	getCorsOptions,
+	sanitizeInput,
+	apiLimiter,
+	authLimiter,
+	registerLimiter,
+	uploadLimiter,
+} = require("./middleware/security");
+const {
+	verifyToken,
+	verifyAdmin,
+	generateToken,
+	verifyTokenManual,
+} = require("./middleware/auth");
+
 // Robust recursive delete utilities (handle Windows EPERM/EBUSY cases)
 function tryUnlinkFile(targetFile) {
 	try {
@@ -69,14 +86,20 @@ function forceRemoveSync(targetPath) {
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// Middleware
-app.use(cors());
-app.use(express.json({ limit: "10mb" }));
+// Trust proxy - required for rate limiting behind reverse proxy
+app.set("trust proxy", 1);
+
+// Security Middleware
+app.use(helmetConfig);
+app.use(cors(getCorsOptions()));
+app.use(express.json({ limit: "100mb" }));
+app.use(express.urlencoded({ extended: true, limit: "100mb" }));
+app.use(...sanitizeInput); // Apply input sanitization
 
 // MongoDB Connection
 mongoose
 	.connect(
-		process.env.MONGODB_URI || "mongodb://localhost:27017/template-db",
+		process.env.MONGODB_URI || "mongodb://localhost:27017/plotpoint-db",
 		{
 			useNewUrlParser: true,
 			useUnifiedTopology: true,
@@ -1103,15 +1126,16 @@ function getAuthPayload(req) {
 	const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
 	if (!token) return null;
 	try {
-		return jwt.verify(token, process.env.JWT_SECRET || "devsecret");
+		return verifyTokenManual(token);
 	} catch (_) {
 		return null;
 	}
 }
 
-// Auth routes
+// Auth routes with rate limiting
 app.post(
 	"/api/auth/register",
+	registerLimiter,
 	uploadAvatar.single("avatar"),
 	async (req, res) => {
 		try {
@@ -1126,10 +1150,7 @@ app.post(
 				const auth = req.headers.authorization || "";
 				const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
 				try {
-					const payload = jwt.verify(
-						token,
-						process.env.JWT_SECRET || "devsecret"
-					);
+					const payload = verifyTokenManual(token);
 					if (!payload || payload.role !== "Admin") {
 						return res
 							.status(403)
@@ -1159,16 +1180,14 @@ app.post(
 				avatarPath,
 			});
 			const saved = await user.save();
-			const token = jwt.sign(
-				{
-					sub: saved._id,
-					role: saved.role,
-					email: saved.email,
-					name: saved.name,
-				},
-				process.env.JWT_SECRET || "devsecret",
-				{ expiresIn: "7d" }
+
+			// Use secure token generation
+			const token = generateToken(
+				saved._id.toString(),
+				saved.email,
+				saved.role
 			);
+
 			res.status(201).json({
 				id: saved._id,
 				name: saved.name,
@@ -1183,21 +1202,27 @@ app.post(
 	}
 );
 
-// Upload endpoint for image variables
-app.post("/api/uploads/image", uploadImage.single("file"), async (req, res) => {
-	try {
-		if (!req.file)
-			return res.status(400).json({ message: "file is required" });
-		return res.status(201).json({
-			filename: req.file.filename,
-			url: `/uploads/images/${req.file.filename}`,
-		});
-	} catch (error) {
-		return res.status(400).json({ message: error.message });
+// Upload endpoint for image variables with rate limiting
+app.post(
+	"/api/uploads/image",
+	uploadLimiter,
+	uploadImage.single("file"),
+	async (req, res) => {
+		try {
+			if (!req.file)
+				return res.status(400).json({ message: "file is required" });
+			return res.status(201).json({
+				filename: req.file.filename,
+				url: `/uploads/images/${req.file.filename}`,
+			});
+		} catch (error) {
+			return res.status(400).json({ message: error.message });
+		}
 	}
-});
+);
 
-app.post("/api/auth/login", async (req, res) => {
+// Login endpoint with rate limiting
+app.post("/api/auth/login", authLimiter, async (req, res) => {
 	try {
 		const { email, password } = req.body || {};
 		if (!email || !password)
@@ -1210,16 +1235,10 @@ app.post("/api/auth/login", async (req, res) => {
 		const ok = await bcrypt.compare(password, user.passwordHash);
 		if (!ok)
 			return res.status(401).json({ message: "Invalid credentials" });
-		const token = jwt.sign(
-			{
-				sub: user._id,
-				role: user.role,
-				email: user.email,
-				name: user.name,
-			},
-			process.env.JWT_SECRET || "devsecret",
-			{ expiresIn: "7d" }
-		);
+
+		// Use secure token generation
+		const token = generateToken(user._id.toString(), user.email, user.role);
+
 		res.json({
 			id: user._id,
 			name: user.name,
@@ -1234,26 +1253,9 @@ app.post("/api/auth/login", async (req, res) => {
 });
 
 // List users (admin only)
-app.get("/api/users", async (req, res) => {
+// List users (admin only) - now using secure middleware
+app.get("/api/users", verifyToken, verifyAdmin, async (req, res) => {
 	try {
-		const auth = req.headers.authorization || "";
-		const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
-		const payload = token
-			? (() => {
-					try {
-						return jwt.verify(
-							token,
-							process.env.JWT_SECRET || "devsecret"
-						);
-					} catch {
-						return null;
-					}
-			  })()
-			: null;
-		if (!payload || payload.role !== "Admin")
-			return res
-				.status(403)
-				.json({ message: "Admin privileges required" });
 		const users = await User.find({}, { passwordHash: 0 }).sort({
 			createdAt: -1,
 		});
