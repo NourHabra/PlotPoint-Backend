@@ -82,19 +82,28 @@ const helmetConfig = helmet({
 // CORS configuration
 const getCorsOptions = () => {
   const allowedOrigins = process.env.ALLOWED_ORIGINS 
-    ? process.env.ALLOWED_ORIGINS.split(',')
+    ? process.env.ALLOWED_ORIGINS.split(',').map(o => o.trim())
     : ['http://localhost:3000']; // Default for development only
 
   return {
     origin: function (origin, callback) {
-      // Allow requests with no origin (like mobile apps or curl requests) only in development
-      if (!origin && process.env.NODE_ENV !== 'production') {
+      // Log for debugging
+      console.log(`[CORS] Request from origin: ${origin || 'no-origin'}`);
+      console.log(`[CORS] Allowed origins: ${allowedOrigins.join(', ')}`);
+      
+      // Allow requests with no origin (like server-to-server, curl, or same-origin)
+      // This happens when requests come through Nginx or from server-side
+      if (!origin) {
+        console.log('[CORS] No origin header - allowing (proxied request)');
         return callback(null, true);
       }
       
+      // Check if origin is in allowed list
       if (allowedOrigins.indexOf(origin) !== -1 || allowedOrigins.includes('*')) {
+        console.log(`[CORS] Origin ${origin} is allowed`);
         callback(null, true);
       } else {
+        console.log(`[CORS] Origin ${origin} is NOT allowed`);
         callback(new Error('Not allowed by CORS'));
       }
     },
