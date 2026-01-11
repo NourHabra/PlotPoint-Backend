@@ -3915,8 +3915,9 @@ app.post("/api/cadastral/query", async (req, res) => {
 });
 
 // Start server
-const server = app.listen(PORT, () => {
-	console.log(`Server is running on port ${PORT}`);
+const HOST = process.env.HOST || '127.0.0.1';
+const server = app.listen(PORT, HOST, () => {
+	console.log(`Server is running on ${HOST}:${PORT}`);
 });
 // Extend timeouts to support long-running report generations
 server.requestTimeout = 15 * 60 * 1000; // 15 minutes

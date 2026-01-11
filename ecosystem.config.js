@@ -8,10 +8,11 @@ module.exports = {
 			autorestart: true,
 			watch: false,
 			max_memory_restart: "2G",
-			env_production: {
-				NODE_ENV: "production",
-				PORT: 5000,
-			},
+		env_production: {
+			NODE_ENV: "production",
+			PORT: 5000,
+			HOST: "127.0.0.1",
+		},
 			error_file: "./logs/err.log",
 			out_file: "./logs/out.log",
 			log_file: "./logs/combined.log",
