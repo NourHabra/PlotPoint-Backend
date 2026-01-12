@@ -329,7 +329,7 @@ async function refreshIndexesWithMacro(
 ) {
 	console.log("Updating Indexes");
 	// Use default LO profile so the existing server macro is discoverable
-	const macroArg = `macro:///Standard.Module1.UpdateIndexes(${sourceDocxPath})`;
+	const macroArg = `macro:///PlotPoint.Module1.UpdateIndexes(${sourceDocxPath})`;
 	const args = [
 		"--headless",
 		"--nocrashreport",
@@ -526,7 +526,7 @@ async function appendImagesBatchToDocWithMacro(
 	const docUrl = pathToEncodedFileUrl(targetDocxPath);
 	const imagesArg = imagePaths.map((p) => pathToEncodedFileUrl(p)).join("|");
 	// Order per new macro signature: (docPath, imagesPipeString)
-	const macroArg = `macro:///Standard.Appendix.InsertPhotos_FitToPage(${docUrl},${imagesArg})`;
+	const macroArg = `macro:///PlotPoint.Appendix.InsertPhotos_FitToPage(${docUrl},${imagesArg})`;
 	const args = [
 		"--headless",
 		"--invisible",
@@ -573,7 +573,7 @@ async function replacePlaceholdersWithImagesBatchUsingMacro(
 				`${String(token)}::${pathToEncodedFileUrl(imgPath)}`
 		)
 		.join("|");
-	const macroArg = `macro:///Standard.Inline.InsertPhotosByPlaceholders_FitToPage(${docUrl},${pairsArg})`;
+	const macroArg = `macro:///PlotPoint.Inline.InsertPhotosByPlaceholders_FitToPage(${docUrl},${pairsArg})`;
 	const args = [
 		"--headless",
 		"--norestore",
