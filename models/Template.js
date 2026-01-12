@@ -127,7 +127,7 @@ const templateSchema = new mongoose.Schema(
 					sourceText: { type: String },
 					kmlField: { type: String },
 					options: [{ type: String }],
-					expression: { type: String },
+					// expression: { type: String }, // REMOVED: Security vulnerability
 					// New: predefined text templates for text variables
 					textTemplates: [{ type: String }],
 					// Image-specific mapping info for replacing media in DOCX

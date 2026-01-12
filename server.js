@@ -1540,18 +1540,19 @@ async function generateFromTemplate(
 				finalValues[v.name] = str;
 			}
 		}
-		if (v.type === "calculated" && v.expression) {
-			try {
-				// eslint-disable-next-line no-new-func
-				const fn = new Function(
-					...Object.keys(finalValues),
-					`return (${v.expression});`
-				);
-				finalValues[v.name] = String(fn(...Object.values(finalValues)));
-			} catch (e) {
-				finalValues[v.name] = "";
-			}
-		}
+		// SECURITY: Calculated variables disabled - code execution vulnerability
+		// if (v.type === "calculated" && v.expression) {
+		// 	try {
+		// 		// eslint-disable-next-line no-new-func
+		// 		const fn = new Function(
+		// 			...Object.keys(finalValues),
+		// 			`return (${v.expression});`
+		// 		);
+		// 		finalValues[v.name] = String(fn(...Object.values(finalValues)));
+		// 	} catch (e) {
+		// 		finalValues[v.name] = "";
+		// 	}
+		// }
 		// Normalize date variables to "Mon DD, YYYY"
 		if (v.type === "date") {
 			const raw = finalValues[v.name];
@@ -1788,8 +1789,8 @@ app.get("/api/templates/:id", async (req, res) => {
 	}
 });
 
-// Create new template
-app.post("/api/templates", async (req, res) => {
+// Create new template (Admin only)
+app.post("/api/templates", verifyToken, verifyAdmin, async (req, res) => {
 	try {
 		const template = new Template(req.body);
 		const savedTemplate = await template.save();
@@ -1799,9 +1800,11 @@ app.post("/api/templates", async (req, res) => {
 	}
 });
 
-// Import DOCX template with variables metadata
+// Import DOCX template with variables metadata (Admin only)
 app.post(
 	"/api/templates/import-docx",
+	verifyToken,
+	verifyAdmin,
 	upload.single("file"),
 	async (req, res) => {
 		try {
@@ -2057,8 +2060,8 @@ app.post(
 	}
 );
 
-// Finalize import of an already tokenized DOCX using provided variables metadata
-app.post("/api/templates/finalize-import", async (req, res) => {
+// Finalize import of an already tokenized DOCX using provided variables metadata (Admin only)
+app.post("/api/templates/finalize-import", verifyToken, verifyAdmin, async (req, res) => {
 	try {
 		const {
 			name,
@@ -3411,20 +3414,21 @@ app.post("/api/templates/:id/preview-html", async (req, res) => {
 					finalValues[v.name] = str;
 				}
 			}
-			if (v.type === "calculated" && v.expression) {
-				try {
-					// eslint-disable-next-line no-new-func
-					const fn = new Function(
-						...Object.keys(finalValues),
-						`return (${v.expression});`
-					);
-					finalValues[v.name] = String(
-						fn(...Object.values(finalValues))
-					);
-				} catch (_) {
-					finalValues[v.name] = "";
-				}
-			}
+			// SECURITY: Calculated variables disabled - code execution vulnerability
+			// if (v.type === "calculated" && v.expression) {
+			// 	try {
+			// 		// eslint-disable-next-line no-new-func
+			// 		const fn = new Function(
+			// 			...Object.keys(finalValues),
+			// 			`return (${v.expression});`
+			// 		);
+			// 		finalValues[v.name] = String(
+			// 			fn(...Object.values(finalValues))
+			// 		);
+			// 	} catch (_) {
+			// 		finalValues[v.name] = "";
+			// 	}
+			// }
 		}
 
 		// Normalize date variables to "Mon DD, YYYY"
@@ -3493,8 +3497,8 @@ app.post("/api/templates/:id/preview-html", async (req, res) => {
 	}
 });
 
-// Update template
-app.put("/api/templates/:id", async (req, res) => {
+// Update template (Admin only)
+app.put("/api/templates/:id", verifyToken, verifyAdmin, async (req, res) => {
 	try {
 		const template = await Template.findByIdAndUpdate(
 			req.params.id,
@@ -3510,8 +3514,8 @@ app.put("/api/templates/:id", async (req, res) => {
 	}
 });
 
-// Delete template (soft delete)
-app.delete("/api/templates/:id", async (req, res) => {
+// Delete template (soft delete, Admin only)
+app.delete("/api/templates/:id", verifyToken, verifyAdmin, async (req, res) => {
 	try {
 		const template = await Template.findByIdAndUpdate(
 			req.params.id,
