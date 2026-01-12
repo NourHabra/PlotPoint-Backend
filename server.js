@@ -185,6 +185,7 @@ async function convertDocxToPdf(sofficePath, inputDocxPath, outputDir) {
 
 	const tryExec = (args) =>
 		new Promise((resolve, reject) => {
+			console.log(`[soffice] ${sofficePath} ${args.join(" ")}`);
 			execFile(
 				sofficePath,
 				args,
@@ -268,6 +269,7 @@ async function convertWithSoffice(sofficePath, filter, inputPath, outputDir) {
 		outputDir,
 		inputPath,
 	];
+	console.log(`[soffice] ${sofficePath} ${args.join(" ")}`);
 	await new Promise((resolve, reject) => {
 		execFile(
 			sofficePath,
@@ -341,6 +343,7 @@ async function refreshIndexesWithMacro(
 	];
 	try {
 		console.log("[gen][macro] executing");
+		console.log(`[soffice] ${sofficePath} ${args.join(" ")}`);
 	} catch (_) {}
 	await new Promise((resolve, reject) => {
 		execFile(
@@ -473,6 +476,7 @@ async function runPdftoppmToPng(inputPdfPath, pagesDir, baseName, dpi) {
 			inputPdfPath,
 			path.join(pagesDir, baseName),
 		];
+		console.log(`[pdftoppm] pdftoppm ${args.join(" ")}`);
 		execFile(
 			"pdftoppm",
 			args,
@@ -536,6 +540,7 @@ async function appendImagesBatchToDocWithMacro(
 	];
 	try {
 		console.log(`[appendix][batch] executing`);
+		console.log(`[soffice] ${sofficePath} ${args.join(" ")}`);
 	} catch (_) {}
 	await new Promise((resolve, reject) => {
 		execFile(
@@ -583,6 +588,7 @@ async function replacePlaceholdersWithImagesBatchUsingMacro(
 	];
 	try {
 		console.log(`[inline-img][batch] executing`);
+		console.log(`[soffice] ${sofficePath} ${args.join(" ")}`);
 	} catch (_) {}
 	await new Promise((resolve, reject) => {
 		execFile(
@@ -2061,107 +2067,121 @@ app.post(
 );
 
 // Finalize import of an already tokenized DOCX using provided variables metadata (Admin only)
-app.post("/api/templates/finalize-import", verifyToken, verifyAdmin, async (req, res) => {
-	try {
-		const {
-			name,
-			description = "",
-			requiresKml = false,
-			variableGroups,
-			variables,
-			sourceDocxPath,
-		} = req.body || {};
-		if (!name) return res.status(400).json({ message: "name is required" });
-		if (!sourceDocxPath)
-			return res
-				.status(400)
-				.json({ message: "sourceDocxPath is required" });
-		if (!fs.existsSync(sourceDocxPath))
-			return res
-				.status(400)
-				.json({ message: "sourceDocxPath does not exist" });
-
-		let parsedVariables = Array.isArray(variables) ? variables : [];
-		let parsedGroups = Array.isArray(variableGroups) ? variableGroups : [];
-
-		// Verify tokenization for each variable by checking XML contains {{name}}
-		let xmlForVerify = "";
+app.post(
+	"/api/templates/finalize-import",
+	verifyToken,
+	verifyAdmin,
+	async (req, res) => {
 		try {
-			const bin = fs.readFileSync(sourceDocxPath, "binary");
-			const zip = new PizZip(bin);
-			const docXml = zip.file("word/document.xml");
-			xmlForVerify = docXml ? docXml.asText() : "";
-		} catch (_) {
-			xmlForVerify = "";
-		}
-		const verifyTokenized = (xml, v) =>
-			v && v.name && typeof xml === "string"
-				? xml.includes(`{{${v.name}}}`)
-				: false;
-
-		// Enrich image variables with computed extents if not provided
-		try {
-			const bin = fs.readFileSync(sourceDocxPath, "binary");
-			const zip = new PizZip(bin);
-			parsedVariables = parsedVariables.map((v) => {
-				if (
-					v &&
-					v.type === "image" &&
-					v.imageTarget &&
-					!v.imageExtent
-				) {
-					const ext = findExtentForTargetInZip(zip, v.imageTarget);
-					if (ext) v.imageExtent = ext;
-				}
-				return v;
-			});
-		} catch (_) {}
-
-		const template = new Template({
-			name,
-			description: description || "Imported Word template",
-			requiresKml: !!requiresKml,
-			createdBy: "system",
-			sections: [],
-			sourceDocxPath,
-			variables: parsedVariables.map((v) => ({
-				...v,
-				tokenized: verifyTokenized(xmlForVerify, v),
-			})),
-			variableGroups: Array.isArray(parsedGroups) ? parsedGroups : [],
-		});
-
-		// Build and store an unfilled PDF preview
-		try {
-			const sofficePrimary = resolveSofficePath();
-			await convertDocxToPdf(
-				sofficePrimary,
+			const {
+				name,
+				description = "",
+				requiresKml = false,
+				variableGroups,
+				variables,
 				sourceDocxPath,
-				templatePreviewsDir
-			);
-			const baseName = path.basename(
-				sourceDocxPath,
-				path.extname(sourceDocxPath)
-			);
-			const previewPdf = path.join(
-				templatePreviewsDir,
-				`${baseName}.pdf`
-			);
-			if (fs.existsSync(previewPdf)) {
-				template.previewPdfPath = `/uploads/template-previews/${path.basename(
-					previewPdf
-				)}`;
+			} = req.body || {};
+			if (!name)
+				return res.status(400).json({ message: "name is required" });
+			if (!sourceDocxPath)
+				return res
+					.status(400)
+					.json({ message: "sourceDocxPath is required" });
+			if (!fs.existsSync(sourceDocxPath))
+				return res
+					.status(400)
+					.json({ message: "sourceDocxPath does not exist" });
+
+			let parsedVariables = Array.isArray(variables) ? variables : [];
+			let parsedGroups = Array.isArray(variableGroups)
+				? variableGroups
+				: [];
+
+			// Verify tokenization for each variable by checking XML contains {{name}}
+			let xmlForVerify = "";
+			try {
+				const bin = fs.readFileSync(sourceDocxPath, "binary");
+				const zip = new PizZip(bin);
+				const docXml = zip.file("word/document.xml");
+				xmlForVerify = docXml ? docXml.asText() : "";
+			} catch (_) {
+				xmlForVerify = "";
 			}
-		} catch (e) {
-			console.warn("Failed to build template preview PDF:", e.message);
-		}
+			const verifyTokenized = (xml, v) =>
+				v && v.name && typeof xml === "string"
+					? xml.includes(`{{${v.name}}}`)
+					: false;
 
-		const saved = await template.save();
-		return res.status(201).json(saved);
-	} catch (error) {
-		return res.status(400).json({ message: error.message });
+			// Enrich image variables with computed extents if not provided
+			try {
+				const bin = fs.readFileSync(sourceDocxPath, "binary");
+				const zip = new PizZip(bin);
+				parsedVariables = parsedVariables.map((v) => {
+					if (
+						v &&
+						v.type === "image" &&
+						v.imageTarget &&
+						!v.imageExtent
+					) {
+						const ext = findExtentForTargetInZip(
+							zip,
+							v.imageTarget
+						);
+						if (ext) v.imageExtent = ext;
+					}
+					return v;
+				});
+			} catch (_) {}
+
+			const template = new Template({
+				name,
+				description: description || "Imported Word template",
+				requiresKml: !!requiresKml,
+				createdBy: "system",
+				sections: [],
+				sourceDocxPath,
+				variables: parsedVariables.map((v) => ({
+					...v,
+					tokenized: verifyTokenized(xmlForVerify, v),
+				})),
+				variableGroups: Array.isArray(parsedGroups) ? parsedGroups : [],
+			});
+
+			// Build and store an unfilled PDF preview
+			try {
+				const sofficePrimary = resolveSofficePath();
+				await convertDocxToPdf(
+					sofficePrimary,
+					sourceDocxPath,
+					templatePreviewsDir
+				);
+				const baseName = path.basename(
+					sourceDocxPath,
+					path.extname(sourceDocxPath)
+				);
+				const previewPdf = path.join(
+					templatePreviewsDir,
+					`${baseName}.pdf`
+				);
+				if (fs.existsSync(previewPdf)) {
+					template.previewPdfPath = `/uploads/template-previews/${path.basename(
+						previewPdf
+					)}`;
+				}
+			} catch (e) {
+				console.warn(
+					"Failed to build template preview PDF:",
+					e.message
+				);
+			}
+
+			const saved = await template.save();
+			return res.status(201).json(saved);
+		} catch (error) {
+			return res.status(400).json({ message: error.message });
+		}
 	}
-});
+);
 
 // Generate filled DOCX and optionally PDF
 app.post("/api/templates/:id/generate", async (req, res) => {
@@ -3919,7 +3939,7 @@ app.post("/api/cadastral/query", async (req, res) => {
 });
 
 // Start server
-const HOST = process.env.HOST || '127.0.0.1';
+const HOST = process.env.HOST || "127.0.0.1";
 const server = app.listen(PORT, HOST, () => {
 	console.log(`Server is running on ${HOST}:${PORT}`);
 });
