@@ -76,7 +76,8 @@ const generateToken = (userId, email, role) => {
   
   return jwt.sign(
     { 
-      userId, 
+      sub: userId,        // Standard JWT claim for user ID
+      userId,             // Keep for backwards compatibility
       email, 
       role,
       iat: Math.floor(Date.now() / 1000),
