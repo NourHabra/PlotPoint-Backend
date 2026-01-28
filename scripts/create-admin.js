@@ -19,10 +19,7 @@ async function main() {
 	const uri =
 		process.env.MONGODB_URI || "mongodb://localhost:27017/plotpoint-db";
 	console.log(`[create-admin] Connecting to ${uri}`);
-	await mongoose.connect(uri, {
-		useNewUrlParser: true,
-		useUnifiedTopology: true,
-	});
+	await mongoose.connect(uri);
 
 	try {
 		const salt = await bcrypt.genSalt(10);

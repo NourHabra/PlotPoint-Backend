@@ -19,8 +19,9 @@ module.exports = {
 			time: true,
 			// Graceful shutdown
 			kill_timeout: 5000,
-			wait_ready: true,
-			listen_timeout: 10000,
+			// NOTE: `wait_ready` requires the app to call `process.send("ready")`.
+			// This backend does not, so leaving it enabled can cause restart loops.
+			wait_ready: false,
 			// Restart strategies
 			min_uptime: "10s",
 			max_restarts: 10,
