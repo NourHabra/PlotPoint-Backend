@@ -180,13 +180,13 @@ async function convertDocxToPdf(sofficePath, inputDocxPath, outputDir) {
 		inputDocxPath,
 	];
 
-	const tryExec = (args) =>
+		const tryExec = (args) =>
 		new Promise((resolve, reject) => {
 			console.log(`[soffice] ${sofficePath} ${args.join(" ")}`);
 			execFile(
 				sofficePath,
 				args,
-				{ windowsHide: true },
+				getSofficeExecOptions(),
 				(err, stdout, stderr) => {
 					if (err) {
 						const detail =
@@ -271,7 +271,7 @@ async function convertWithSoffice(sofficePath, filter, inputPath, outputDir) {
 		execFile(
 			sofficePath,
 			args,
-			{ windowsHide: true },
+			getSofficeExecOptions(),
 			(err, stdout, stderr) => {
 				if (err) {
 					const detail =
@@ -346,7 +346,7 @@ async function refreshIndexesWithMacro(
 		execFile(
 			sofficePath,
 			args,
-			{ windowsHide: true },
+			getSofficeExecOptions(),
 			(err, stdout, stderr) => {
 				if (err) {
 					const detail =
@@ -388,6 +388,20 @@ try {
 try {
 	fs.mkdirSync(loProfileDir, { recursive: true });
 } catch (_) {}
+// Options for spawning LibreOffice (soffice): writable HOME and headless plugin
+// to avoid "Permission denied" and "javaldx failed" on Linux (e.g. VPS with www-data/PM2).
+function getSofficeExecOptions() {
+	const homeDir = path.resolve(loProfileDir);
+	return {
+		windowsHide: true,
+		env: {
+			...process.env,
+			HOME: homeDir,
+			SAL_USE_VCLPLUGIN: "gen",
+			TMPDIR: homeDir,
+		},
+	};
+}
 // Ensure stats log file exists (create empty if missing)
 try {
 	if (!fs.existsSync(generationStatsLogFile)) {
@@ -543,7 +557,7 @@ async function appendImagesBatchToDocWithMacro(
 		execFile(
 			sofficePath,
 			args,
-			{ windowsHide: true },
+			getSofficeExecOptions(),
 			(err, stdout, stderr) => {
 				if (err) {
 					const detail =
@@ -591,7 +605,7 @@ async function replacePlaceholdersWithImagesBatchUsingMacro(
 		execFile(
 			sofficePath,
 			args,
-			{ windowsHide: true },
+			getSofficeExecOptions(),
 			(err, stdout, stderr) => {
 				if (err) {
 					const detail =
