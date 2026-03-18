@@ -3,8 +3,8 @@ module.exports = {
 		{
 			name: "plotpoint-backend",
 			script: "./server.js",
-			instances: "max", // Use all available CPU cores
-			exec_mode: "cluster",
+			instances: 1, // One process only; server.js listens on one port (cluster would need app-level clustering)
+			exec_mode: "fork",
 			autorestart: true,
 			watch: false,
 			max_memory_restart: "2G",
