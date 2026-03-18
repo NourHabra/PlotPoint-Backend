@@ -164,6 +164,8 @@ function resolveSofficePath() {
 async function convertDocxToPdf(sofficePath, inputDocxPath, outputDir) {
 	// Use shared LO profile to avoid startup cost each run
 	const profileUrl = `file:///${loProfileDir.replace(/\\/g, "/")}`;
+	// Resolve to absolute path so LibreOffice always writes to the intended directory
+	const outDirAbs = path.resolve(outputDir);
 
 	const makeArgs = (filter) => [
 		"--headless",
@@ -176,8 +178,8 @@ async function convertDocxToPdf(sofficePath, inputDocxPath, outputDir) {
 		"--convert-to",
 		filter,
 		"--outdir",
-		outputDir,
-		inputDocxPath,
+		outDirAbs,
+		path.resolve(inputDocxPath),
 	];
 
 		const tryExec = (args) =>
@@ -205,6 +207,44 @@ async function convertDocxToPdf(sofficePath, inputDocxPath, outputDir) {
 	} catch (_) {
 		await tryExec(makeArgs("pdf"));
 	}
+}
+
+// Resolve actual PDF path after conversion (LibreOffice may write to outdir, cwd, or profile)
+async function resolvePdfPathAfterConversion(expectedPdfPath, outputDir) {
+	const base = path.basename(expectedPdfPath);
+	const candidates = [
+		expectedPdfPath,
+		path.join(outputDir, base),
+		path.join(process.cwd(), base),
+		path.join(loProfileDir, base),
+	];
+	const check = () => {
+		for (const p of candidates) {
+			if (fs.existsSync(p)) return p;
+		}
+		return null;
+	};
+	// Immediate check, then short retries for slow/NFS filesystems
+	let found = check();
+	if (found) return found;
+	const maxWait = 2000;
+	const step = 200;
+	for (let waited = 0; waited < maxWait; waited += step) {
+		await new Promise((r) => setTimeout(r, step));
+		found = check();
+		if (found) return found;
+	}
+	// Debug: list what is in outputDir and loProfileDir
+	const outList = (dir) => {
+		try {
+			return fs.readdirSync(dir).filter((f) => f.endsWith(".pdf")).join(", ") || "(none)";
+		} catch (_) {
+			return "(readdir failed)";
+		}
+	};
+	throw new Error(
+		`PDF not found at ${expectedPdfPath}. Output dir PDFs: ${outList(outputDir)}. Profile dir PDFs: ${outList(loProfileDir)}. cwd: ${process.cwd()}`
+	);
 }
 
 // Helper: build file URL for LibreOffice macro parameters
@@ -1739,7 +1779,19 @@ async function generateFromTemplate(
 				detail: convertError.message,
 			});
 		}
-		const outPdf = outDocx.replace(/\.docx$/, ".pdf");
+		const expectedPdf = outDocx.replace(/\.docx$/, ".pdf");
+		let outPdf;
+		try {
+			outPdf = await resolvePdfPathAfterConversion(expectedPdf, outDir);
+		} catch (e) {
+			return res.status(500).json({
+				message: "PDF conversion failed",
+				detail: e.message,
+			});
+		}
+		if (outPdf !== expectedPdf) {
+			console.log("[gen] pdf found at alternate path:", outPdf);
+		}
 		console.log("[gen] streaming pdf");
 		const pdfStat = fs.statSync(outPdf);
 		res.setHeader("Content-Type", "application/pdf");
