@@ -161,11 +161,19 @@ function resolveSofficePath() {
 	return "soffice";
 }
 
+// convertDocxToPdf returns the absolute path of the generated PDF.
+// LibreOffice may write to outdir, the input-file directory, or cwd depending on the version;
+// we detect the actual location via stdout parsing + before/after snapshot.
 async function convertDocxToPdf(sofficePath, inputDocxPath, outputDir) {
-	// Use shared LO profile to avoid startup cost each run
 	const profileUrl = `file:///${loProfileDir.replace(/\\/g, "/")}`;
-	// Resolve to absolute path so LibreOffice always writes to the intended directory
 	const outDirAbs = path.resolve(outputDir);
+	const inputAbs = path.resolve(inputDocxPath);
+
+	// Snapshot all PDFs in outDir BEFORE conversion to detect new ones afterwards
+	let pdfsBefore = new Set();
+	try {
+		fs.readdirSync(outDirAbs).forEach((f) => { if (f.endsWith(".pdf")) pdfsBefore.add(f); });
+	} catch (_) {}
 
 	const makeArgs = (filter) => [
 		"--headless",
@@ -179,10 +187,10 @@ async function convertDocxToPdf(sofficePath, inputDocxPath, outputDir) {
 		filter,
 		"--outdir",
 		outDirAbs,
-		path.resolve(inputDocxPath),
+		inputAbs,
 	];
 
-		const tryExec = (args) =>
+	const tryExec = (args) =>
 		new Promise((resolve, reject) => {
 			console.log(`[soffice] ${sofficePath} ${args.join(" ")}`);
 			execFile(
@@ -190,52 +198,70 @@ async function convertDocxToPdf(sofficePath, inputDocxPath, outputDir) {
 				args,
 				getSofficeExecOptions(),
 				(err, stdout, stderr) => {
+					const stdoutStr = (stdout && stdout.toString().trim()) || "";
+					const stderrStr = (stderr && stderr.toString().trim()) || "";
+					if (stdoutStr) console.log(`[soffice stdout] ${stdoutStr}`);
+					if (stderrStr) console.log(`[soffice stderr] ${stderrStr}`);
 					if (err) {
-						const detail =
-							(stderr && stderr.toString()) ||
-							(stdout && stdout.toString()) ||
-							err.message;
-						return reject(new Error(detail));
+						return reject(new Error(stderrStr || stdoutStr || err.message));
 					}
-					resolve();
+					resolve(stdoutStr);
 				}
 			);
 		});
 
+	let stdoutStr = "";
 	try {
-		await tryExec(makeArgs("pdf:writer_pdf_Export"));
+		stdoutStr = await tryExec(makeArgs("pdf:writer_pdf_Export"));
 	} catch (_) {
-		await tryExec(makeArgs("pdf"));
+		stdoutStr = await tryExec(makeArgs("pdf"));
 	}
-}
 
-// Resolve actual PDF path after conversion (LibreOffice may write to outdir, cwd, or profile)
-async function resolvePdfPathAfterConversion(expectedPdfPath, outputDir) {
-	const base = path.basename(expectedPdfPath);
-	const candidates = [
-		expectedPdfPath,
-		path.join(outputDir, base),
-		path.join(process.cwd(), base),
-		path.join(loProfileDir, base),
-	];
-	const check = () => {
-		for (const p of candidates) {
-			if (fs.existsSync(p)) return p;
+	// 1. Parse LibreOffice's own output: "convert /in.docx -> /out.pdf using filter : ..."
+	const loMatch = stdoutStr.match(/->\s*(.+?\.pdf)\b/i);
+	if (loMatch) {
+		const parsed = loMatch[1].trim();
+		if (fs.existsSync(parsed)) {
+			console.log(`[soffice] output resolved via stdout parse: ${parsed}`);
+			return parsed;
 		}
-		return null;
-	};
-	// Immediate check, then short retries for slow/NFS filesystems
-	let found = check();
-	if (found) return found;
-	const maxWait = 2000;
-	const step = 200;
-	for (let waited = 0; waited < maxWait; waited += step) {
-		await new Promise((r) => setTimeout(r, step));
-		found = check();
-		if (found) return found;
 	}
-	// Debug: list what is in outputDir and loProfileDir
-	const outList = (dir) => {
+
+	// 2. Look for new PDFs that appeared in outDir since the snapshot
+	try {
+		const newPdfs = fs.readdirSync(outDirAbs)
+			.filter((f) => f.endsWith(".pdf") && !pdfsBefore.has(f));
+		if (newPdfs.length > 0) {
+			const newest = newPdfs
+				.map((f) => ({ f, mt: fs.statSync(path.join(outDirAbs, f)).mtimeMs }))
+				.sort((a, b) => b.mt - a.mt)[0];
+			const resolved = path.join(outDirAbs, newest.f);
+			console.log(`[soffice] output resolved via dir snapshot: ${resolved}`);
+			return resolved;
+		}
+	} catch (_) {}
+
+	// 3. Expected conventional path (same basename, .pdf extension, in outDir)
+	const expected = path.join(outDirAbs, path.basename(inputAbs).replace(/\.docx$/i, ".pdf"));
+	if (fs.existsSync(expected)) {
+		console.log(`[soffice] output resolved via expected path: ${expected}`);
+		return expected;
+	}
+
+	// 4. Check next to input file and in cwd
+	for (const candidate of [
+		inputAbs.replace(/\.docx$/i, ".pdf"),
+		path.join(process.cwd(), path.basename(inputAbs).replace(/\.docx$/i, ".pdf")),
+		path.join(loProfileDir, path.basename(inputAbs).replace(/\.docx$/i, ".pdf")),
+	]) {
+		if (fs.existsSync(candidate)) {
+			console.log(`[soffice] output resolved via fallback candidate: ${candidate}`);
+			return candidate;
+		}
+	}
+
+	// Give up — include directory listings for diagnostics
+	const listDir = (dir) => {
 		try {
 			return fs.readdirSync(dir).filter((f) => f.endsWith(".pdf")).join(", ") || "(none)";
 		} catch (_) {
@@ -243,7 +269,11 @@ async function resolvePdfPathAfterConversion(expectedPdfPath, outputDir) {
 		}
 	};
 	throw new Error(
-		`PDF not found at ${expectedPdfPath}. Output dir PDFs: ${outList(outputDir)}. Profile dir PDFs: ${outList(loProfileDir)}. cwd: ${process.cwd()}`
+		`PDF not found after conversion. ` +
+		`outDir PDFs: [${listDir(outDirAbs)}]. ` +
+		`loProfile PDFs: [${listDir(loProfileDir)}]. ` +
+		`cwd: ${process.cwd()}. ` +
+		`LO stdout: ${stdoutStr || "(empty)"}`
 	);
 }
 
@@ -1739,11 +1769,12 @@ async function generateFromTemplate(
 		console.log("[gen] converting to pdf");
 		const sofficePrimary = resolveSofficePath();
 		const outDir = uploadsDir;
-		// Try conversion with primary path first
+		// convertDocxToPdf now returns the actual PDF path
+		let outPdf = null;
 		let convertError = null;
 		try {
-			await convertDocxToPdf(sofficePrimary, outDocx, outDir);
-			console.log("[gen] pdf converted (primary)");
+			outPdf = await convertDocxToPdf(sofficePrimary, outDocx, outDir);
+			console.log("[gen] pdf converted (primary):", outPdf);
 		} catch (e1) {
 			convertError = e1;
 			// On Windows, retry with explicit soffice.com if available
@@ -1760,37 +1791,23 @@ async function generateFromTemplate(
 				});
 				if (alt) {
 					try {
-						await convertDocxToPdf(alt, outDocx, outDir);
+						outPdf = await convertDocxToPdf(alt, outDocx, outDir);
 						convertError = null;
-						console.log("[gen] pdf converted (fallback)");
+						console.log("[gen] pdf converted (fallback):", outPdf);
 					} catch (e2) {
 						convertError = e2;
 					}
 				}
 			}
 		}
-		if (convertError) {
-			// Cleanup any created DOCX on conversion failure
+		if (convertError || !outPdf) {
 			try {
 				fs.rmSync(outDocx, { force: true });
 			} catch (_) {}
 			return res.status(500).json({
 				message: "PDF conversion failed",
-				detail: convertError.message,
+				detail: convertError ? convertError.message : "PDF path not returned",
 			});
-		}
-		const expectedPdf = outDocx.replace(/\.docx$/, ".pdf");
-		let outPdf;
-		try {
-			outPdf = await resolvePdfPathAfterConversion(expectedPdf, outDir);
-		} catch (e) {
-			return res.status(500).json({
-				message: "PDF conversion failed",
-				detail: e.message,
-			});
-		}
-		if (outPdf !== expectedPdf) {
-			console.log("[gen] pdf found at alternate path:", outPdf);
 		}
 		console.log("[gen] streaming pdf");
 		const pdfStat = fs.statSync(outPdf);
