@@ -1741,8 +1741,12 @@ async function generateFromTemplate(
 		}
 		const outPdf = outDocx.replace(/\.docx$/, ".pdf");
 		console.log("[gen] streaming pdf");
+		const pdfStat = fs.statSync(outPdf);
 		res.setHeader("Content-Type", "application/pdf");
 		res.setHeader("Content-Disposition", `attachment; filename=report.pdf`);
+		res.setHeader("Content-Length", pdfStat.size);
+		// Tell Nginx not to buffer this download — prevents the client hanging
+		res.setHeader("X-Accel-Buffering", "no");
 		const pdfStream = fs.createReadStream(outPdf);
 		pdfStream.pipe(res);
 		const cleanupPdfAndDocx = () => {
@@ -1761,11 +1765,14 @@ async function generateFromTemplate(
 		return;
 	}
 
+	const docxStat = fs.statSync(outDocx);
 	res.setHeader(
 		"Content-Type",
 		"application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 	);
 	res.setHeader("Content-Disposition", `attachment; filename=report.docx`);
+	res.setHeader("Content-Length", docxStat.size);
+	res.setHeader("X-Accel-Buffering", "no");
 	console.log("[gen] streaming docx");
 	const docxStream = fs.createReadStream(outDocx);
 	docxStream.pipe(res);
