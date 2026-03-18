@@ -463,16 +463,23 @@ try {
 // Options for spawning LibreOffice (soffice): writable HOME and headless plugin
 // to avoid "Permission denied" and "javaldx failed" on Linux (e.g. VPS with www-data/PM2).
 function getSofficeExecOptions() {
-	// Set HOME to a writable directory so LibreOffice can find/create its config
-	// without crashing ("Permission denied", "javaldx failed") when running under
-	// a service account (PM2, www-data) that has no real HOME.
-	// Do NOT override TMPDIR — LibreOffice needs the real /tmp for conversion work files.
+	// HOME  — must point to a writable directory so LibreOffice can find/create
+	//         its config without crashing ("Permission denied", "javaldx failed")
+	//         when the process runs under a service account with no real HOME.
+	// SAL_USE_VCLPLUGIN=gen — forces the generic (non-X11) VCL backend.
+	//         Without this, LibreOffice on some Linux installs tries to open an
+	//         X11 display even when --headless is passed, then exits with
+	//         "Can't open display" and produces no output.
+	// TMPDIR is intentionally NOT overridden — LibreOffice needs the real /tmp
+	//         for intermediate conversion work files; pointing it elsewhere
+	//         causes silent conversion failures.
 	const homeDir = path.resolve(loProfileDir);
 	return {
 		windowsHide: true,
 		env: {
 			...process.env,
 			HOME: homeDir,
+			SAL_USE_VCLPLUGIN: "gen",
 		},
 	};
 }
