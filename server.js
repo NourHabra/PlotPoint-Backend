@@ -165,7 +165,9 @@ function resolveSofficePath() {
 // LibreOffice may write to outdir, the input-file directory, or cwd depending on the version;
 // we detect the actual location via stdout parsing + before/after snapshot.
 async function convertDocxToPdf(sofficePath, inputDocxPath, outputDir) {
-	const profileUrl = `file:///${loProfileDir.replace(/\\/g, "/")}`;
+	// file:// + absolute-path (already starts with /) = file:///path  (3 slashes total, correct)
+	// Using file:/// + /path would give file:////path (4 slashes, wrong)
+	const profileUrl = `file://${loProfileDir.replace(/\\/g, "/")}`;
 	const outDirAbs = path.resolve(outputDir);
 	const inputAbs = path.resolve(inputDocxPath);
 
@@ -461,14 +463,16 @@ try {
 // Options for spawning LibreOffice (soffice): writable HOME and headless plugin
 // to avoid "Permission denied" and "javaldx failed" on Linux (e.g. VPS with www-data/PM2).
 function getSofficeExecOptions() {
+	// Set HOME to a writable directory so LibreOffice can find/create its config
+	// without crashing ("Permission denied", "javaldx failed") when running under
+	// a service account (PM2, www-data) that has no real HOME.
+	// Do NOT override TMPDIR — LibreOffice needs the real /tmp for conversion work files.
 	const homeDir = path.resolve(loProfileDir);
 	return {
 		windowsHide: true,
 		env: {
 			...process.env,
 			HOME: homeDir,
-			SAL_USE_VCLPLUGIN: "gen",
-			TMPDIR: homeDir,
 		},
 	};
 }
