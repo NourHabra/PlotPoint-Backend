@@ -11,6 +11,7 @@ const mammoth = require("mammoth");
 const pathLib = require("path");
 const fetch = require("node-fetch");
 const sharp = require("sharp");
+const pdfParse = require("pdf-parse");
 require("dotenv").config();
 
 // Import security middleware
@@ -1315,6 +1316,392 @@ app.post(
 			});
 		} catch (error) {
 			return res.status(400).json({ message: error.message });
+		}
+	}
+);
+
+// PDF extraction endpoint for extracting multiple values from PDF
+app.post(
+	"/api/uploads/extract-pdf",
+	upload.single("file"),
+	async (req, res) => {
+		try {
+			if (!req.file)
+				return res
+					.status(400)
+					.json({ message: "PDF file is required" });
+
+			const ext = path.extname(req.file.originalname || "").toLowerCase();
+			if (ext !== ".pdf")
+				return res.status(400).json({ message: "File must be a PDF" });
+
+			const dataBuffer = fs.readFileSync(req.file.path);
+			const pdfData = await pdfParse(dataBuffer);
+			const text = pdfData.text;
+
+			const createAccentInsensitivePattern = (baseText) => {
+				const accentMap = {
+					α: "[αά]",
+					ά: "[αά]",
+					Α: "[ΑΆ]",
+					Ά: "[ΑΆ]",
+					ε: "[εέ]",
+					έ: "[εέ]",
+					Ε: "[ΕΈ]",
+					Έ: "[ΕΈ]",
+					η: "[ηή]",
+					ή: "[ηή]",
+					Η: "[ΗΉ]",
+					Ή: "[ΗΉ]",
+					ι: "[ιίϊΐ]",
+					ί: "[ιίϊΐ]",
+					ϊ: "[ιίϊΐ]",
+					ΐ: "[ιίϊΐ]",
+					Ι: "[ΙΊΪ]",
+					Ί: "[ΙΊΪ]",
+					Ϊ: "[ΙΊΪ]",
+					ο: "[οό]",
+					ό: "[οό]",
+					Ο: "[ΟΌ]",
+					Ό: "[ΟΌ]",
+					υ: "[υύϋΰ]",
+					ύ: "[υύϋΰ]",
+					ϋ: "[υύϋΰ]",
+					ΰ: "[υύϋΰ]",
+					Υ: "[ΥΎΫ]",
+					Ύ: "[ΥΎΫ]",
+					Ϋ: "[ΥΎΫ]",
+					ω: "[ωώ]",
+					ώ: "[ωώ]",
+					Ω: "[ΩΏ]",
+					Ώ: "[ΩΏ]",
+				};
+
+				let pattern = "";
+				for (let i = 0; i < baseText.length; i++) {
+					const char = baseText[i];
+					if (accentMap[char]) {
+						pattern += accentMap[char];
+					} else {
+						pattern += char.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+					}
+				}
+				return new RegExp(pattern, "i");
+			};
+
+			const extractBetween = (text, startMarker, endMarker) => {
+				const startPattern =
+					createAccentInsensitivePattern(startMarker);
+				const startMatch = text.match(startPattern);
+				if (!startMatch || startMatch.index === undefined) return null;
+
+				const startIndex = startMatch.index;
+				const startLength = startMatch[0].length;
+				let valueStart = startIndex + startLength;
+
+				while (
+					valueStart < text.length &&
+					/[\s]/.test(text[valueStart])
+				) {
+					valueStart++;
+				}
+
+				if (endMarker) {
+					const endPattern =
+						createAccentInsensitivePattern(endMarker);
+					const textAfterStart = text.substring(valueStart);
+					const endMatch = textAfterStart.match(endPattern);
+					if (!endMatch || endMatch.index === undefined) return null;
+					const endIndex = valueStart + endMatch.index;
+					return text.substring(valueStart, endIndex).trim();
+				} else {
+					let endIndex = valueStart;
+					while (
+						endIndex < text.length &&
+						text[endIndex] !== "\n" &&
+						text[endIndex] !== "\r"
+					) {
+						endIndex++;
+					}
+					return text.substring(valueStart, endIndex).trim();
+				}
+			};
+
+			const extractAfterPattern = (text, marker, pattern) => {
+				const index = text.indexOf(marker);
+				if (index === -1) return null;
+
+				let startIndex = index + marker.length;
+				while (
+					startIndex < text.length &&
+					/[\s:]/g.test(text[startIndex])
+				) {
+					startIndex++;
+				}
+
+				let endIndex = startIndex;
+				while (endIndex < text.length && pattern.test(text[endIndex])) {
+					endIndex++;
+				}
+
+				const extracted = text.substring(startIndex, endIndex).trim();
+				return extracted.replace(/[^0-9/\s\-A-Za-z.]+$/, "");
+			};
+
+			// 1. Extract "ΑΡ. ΕΚΤΙΜΗΣΗΣ"
+			let arEktimisis = null;
+			const ektimisiPattern1 = createAccentInsensitivePattern("Εκτίμηση");
+			const ektimisiPattern2 = createAccentInsensitivePattern("Εκτιμήση");
+
+			let ektimisiMatch = text.match(ektimisiPattern1);
+			if (!ektimisiMatch) {
+				ektimisiMatch = text.match(ektimisiPattern2);
+			}
+
+			let ektimisiIndex = -1;
+			let ektimisiLength = 0;
+
+			if (ektimisiMatch && ektimisiMatch.index !== undefined) {
+				ektimisiIndex = ektimisiMatch.index;
+				ektimisiLength = ektimisiMatch[0].length;
+			}
+
+			if (ektimisiIndex !== -1) {
+				let startIndex = ektimisiIndex + ektimisiLength;
+				while (
+					startIndex < text.length &&
+					/[\s]/.test(text[startIndex])
+				) {
+					startIndex++;
+				}
+				let endIndex = startIndex;
+				const arPattern = /[0-9/\s]/;
+				while (
+					endIndex < text.length &&
+					arPattern.test(text[endIndex])
+				) {
+					endIndex++;
+				}
+				arEktimisis = text.substring(startIndex, endIndex).trim();
+				arEktimisis = arEktimisis.replace(/[^0-9/\s]+$/, "").trim();
+			}
+
+			// 2. Extract "ΟΝΟΜΑ ΠΕΛΑΤΗ"
+			let onomaPelati = null;
+			const pelatesPattern = createAccentInsensitivePattern("Πελάτες");
+			const pelatesMatch = text.match(pelatesPattern);
+			if (pelatesMatch && pelatesMatch.index !== undefined) {
+				const pelatesIndex = pelatesMatch.index;
+				const pelatesLength = pelatesMatch[0].length;
+				const textAfterPelates = text.substring(
+					pelatesIndex + pelatesLength
+				);
+				let dashIndex = textAfterPelates.indexOf(" - ");
+				if (dashIndex === -1) {
+					dashIndex = textAfterPelates.indexOf("-");
+				}
+				if (dashIndex !== -1) {
+					dashIndex = pelatesIndex + pelatesLength + dashIndex;
+					let startIndex = dashIndex;
+					if (text.substring(dashIndex, dashIndex + 3) === " - ") {
+						startIndex = dashIndex + 3;
+					} else {
+						startIndex = dashIndex + 1;
+					}
+					while (
+						startIndex < text.length &&
+						/[\s]/.test(text[startIndex])
+					) {
+						startIndex++;
+					}
+					let endIndex = text.indexOf(",", startIndex);
+					if (endIndex === -1) {
+						const match = text
+							.substring(startIndex)
+							.match(/^(.+?)(?=\s+\d{8,})/);
+						if (match) {
+							endIndex = startIndex + match[1].length;
+						} else {
+							endIndex = text.indexOf("\n", startIndex);
+							if (endIndex === -1) endIndex = text.length;
+						}
+					}
+					if (endIndex > startIndex) {
+						onomaPelati = text
+							.substring(startIndex, endIndex)
+							.trim();
+					}
+				}
+			}
+
+			// 3. Extract "Υπάλληλος Τράπεζας"
+			let ypallilosTrapezas = null;
+			const epafiPattern = createAccentInsensitivePattern("Επαφή");
+			const tilefonoBase = "ηλέφωνο";
+			const tilefonoAccentPattern =
+				createAccentInsensitivePattern(tilefonoBase);
+			const tilefonoPattern = new RegExp(
+				"[TΤ]" + tilefonoAccentPattern.source,
+				"i"
+			);
+			const phonePattern = /\d{8,}\)/;
+			const katastimaStopPattern =
+				createAccentInsensitivePattern("Κατάστημα");
+
+			const epafiMatch = text.match(epafiPattern);
+			if (epafiMatch && epafiMatch.index !== undefined) {
+				const epafiIndex = epafiMatch.index;
+				const epafiLength = epafiMatch[0].length;
+				const textAfterEpafi = text.substring(epafiIndex + epafiLength);
+
+				let valueStart = epafiIndex + epafiLength;
+				while (
+					valueStart < text.length &&
+					/[\s\n\r]/.test(text[valueStart])
+				) {
+					valueStart++;
+				}
+
+				let endIndex = -1;
+				const stopMarkers = [];
+
+				const tilefonoMatch = textAfterEpafi.match(tilefonoPattern);
+				if (tilefonoMatch && tilefonoMatch.index !== undefined) {
+					stopMarkers.push({
+						index: epafiIndex + epafiLength + tilefonoMatch.index,
+						type: "tilefono",
+					});
+				}
+
+				const phoneMatch = textAfterEpafi.match(phonePattern);
+				if (phoneMatch && phoneMatch.index !== undefined) {
+					stopMarkers.push({
+						index: epafiIndex + epafiLength + phoneMatch.index,
+						type: "phone",
+					});
+				}
+
+				const katastimaStopMatch =
+					textAfterEpafi.match(katastimaStopPattern);
+				if (
+					katastimaStopMatch &&
+					katastimaStopMatch.index !== undefined
+				) {
+					stopMarkers.push({
+						index:
+							epafiIndex + epafiLength + katastimaStopMatch.index,
+						type: "katastima",
+					});
+				}
+
+				if (stopMarkers.length > 0) {
+					stopMarkers.sort((a, b) => a.index - b.index);
+					endIndex = stopMarkers[0].index;
+
+					while (
+						endIndex > valueStart &&
+						/[\s\n\r]/.test(text[endIndex - 1])
+					) {
+						endIndex--;
+					}
+
+					console.log(
+						"[extract] Υπάλληλος Τράπεζας - Stop markers found:",
+						stopMarkers
+					);
+					console.log(
+						"[extract] Using earliest stop marker at index:",
+						endIndex
+					);
+				}
+
+				if (endIndex > valueStart) {
+					let extracted = text.substring(valueStart, endIndex);
+					extracted = extracted
+						.replace(/\r\n/g, "\n")
+						.replace(/\r/g, "\n")
+						.replace(/\n{3,}/g, "\n\n")
+						.trim();
+					ypallilosTrapezas = extracted
+						.replace(/\n/g, " ")
+						.replace(/\s+/g, " ")
+						.trim();
+
+					console.log(
+						"[extract] Υπάλληλος Τράπεζας - Raw extracted:",
+						text.substring(valueStart, endIndex)
+					);
+					console.log(
+						"[extract] Υπάλληλος Τράπεζας - Final value:",
+						ypallilosTrapezas
+					);
+				} else {
+					console.log(
+						"[extract] Υπάλληλος Τράπεζας - No valid endIndex found. valueStart:",
+						valueStart,
+						"endIndex:",
+						endIndex
+					);
+				}
+			}
+
+			// 4. Extract "ΚΑΤΑΣΤΗΜΑ / ΥΠΗΡΕΣΙΑ ΤΡΑΠΕΖΑΣ"
+			let katastima = null;
+			const katastimaPattern =
+				createAccentInsensitivePattern("Κατάστημα");
+			const katastimaMatch = text.match(katastimaPattern);
+
+			if (katastimaMatch && katastimaMatch.index !== undefined) {
+				const katastimaIndex = katastimaMatch.index;
+				const katastimaLength = katastimaMatch[0].length;
+				let startIndex = katastimaIndex + katastimaLength;
+				while (
+					startIndex < text.length &&
+					/[\s]/.test(text[startIndex])
+				) {
+					startIndex++;
+				}
+				let endIndex = text.indexOf("(", startIndex);
+				if (endIndex === -1) {
+					endIndex = text.indexOf("\n", startIndex);
+					if (endIndex === -1) endIndex = text.length;
+				}
+				if (endIndex > startIndex) {
+					katastima = text.substring(startIndex, endIndex).trim();
+				}
+			}
+
+			const extractedValues = {};
+			if (arEktimisis) extractedValues["ΑΡ. ΕΚΤΙΜΗΣΗΣ"] = arEktimisis;
+			if (onomaPelati) extractedValues["ΟΝΟΜΑ ΠΕΛΑΤΗ"] = onomaPelati;
+			if (ypallilosTrapezas)
+				extractedValues["Υπάλληλος Τράπεζας"] = ypallilosTrapezas;
+			if (katastima)
+				extractedValues["ΚΑΤΑΣΤΗΜΑ / ΥΠΗΡΕΣΙΑ ΤΡΑΠΕΖΑΣ"] = katastima;
+
+			if (Object.keys(extractedValues).length === 0) {
+				try {
+					fs.unlinkSync(req.file.path);
+				} catch (_) {}
+				return res.status(404).json({
+					message: "Could not extract any values from the PDF",
+				});
+			}
+
+			try {
+				fs.unlinkSync(req.file.path);
+			} catch (_) {}
+
+			return res.status(200).json({
+				extractedValues: extractedValues,
+			});
+		} catch (error) {
+			if (req.file && req.file.path) {
+				try {
+					fs.unlinkSync(req.file.path);
+				} catch (_) {}
+			}
+			return res.status(500).json({ message: error.message });
 		}
 	}
 );
